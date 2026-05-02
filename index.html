@@ -182,7 +182,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:13
 // ── 全域資料 ──
 const DATA_URL    = './data/holdings.json';
 const HISTORY_URL = './data/history.json';
-const GEMINI_KEY   = 'AIzaSyBlpyfp737EBYc3rMjBn27msI6EH6sKPEQ';  // 填入你的 Google Gemini API Key
+const GEMINI_KEY   = '';  // 填入你的 Google Gemini API Key
 // 免費申請：https://aistudio.google.com/apikey
 const GEMINI_MODEL = 'gemini-2.0-flash';
 
@@ -466,15 +466,49 @@ async function fetchInst(code){
   const el=document.getElementById('inst-result');
   if(!el) return;
   try{
-    const today=new Date().toISOString().slice(0,10).replace(/-/g,'');
-    const url=`https://www.twse.com.tw/rwd/zh/fund/T86?date=${today}&selectType=ALLBUT0999&response=json`;
-    const r=await fetch(url,{signal:AbortSignal.timeout(12000)});
-    const data=await r.json();
-    const rows=(data.data||[]).filter(row=>(row[0]||'').trim()===code);
+    // 自動往前找最近有資料的交易日（最多找10天）
+    let data=null, usedDate='';
+    const d=new Date();
+    const triedDates=[];
+    for(let i=0;i<14;i++){
+      const dd=new Date(d);
+      dd.setDate(d.getDate()-i);
+      if(dd.getDay()===0||dd.getDay()===6) continue;
+      const dateStr=dd.toISOString().slice(0,10).replace(/-/g,'');
+      triedDates.push(dateStr);
+      if(triedDates.length>=8) break;
+    }
 
+    for(const dateStr of triedDates){
+      // 同時嘗試新舊兩個 API 端點
+      const urls=[
+        `https://www.twse.com.tw/rwd/zh/fund/T86?date=${dateStr}&selectType=ALLBUT0999&response=json`,
+        `https://www.twse.com.tw/fund/T86?date=${dateStr}&selectType=ALLBUT0999&response=json`,
+      ];
+      for(const url of urls){
+        try{
+          const r=await fetch(url,{signal:AbortSignal.timeout(8000)});
+          const d2=await r.json();
+          if((d2.stat==='OK'||d2.status==='ok')&&d2.data&&d2.data.length>0){
+            data=d2; usedDate=dateStr; break;
+          }
+        } catch(e2){ /* 繼續嘗試 */ }
+      }
+      if(data) break;
+    }
+
+    if(!data){
+      el.previousElementSibling.style.display='none';
+      el.innerHTML=`<div class="notice">三大法人資料暫無，盤後18:30更新。<br>
+        <a href="https://www.twse.com.tw/zh/trading/fund/T86.html" target="_blank" style="color:var(--blue)">前往TWSE查詢 →</a></div>`;
+      return;
+    }
+    // 支援新舊欄位格式
+    const rows=(data.data||[]).filter(row=>(row[0]||'').trim()===code||(row[1]||'').trim()===code);
     if(!rows.length){
       el.previousElementSibling.style.display='none';
-      el.innerHTML=`<div class="notice">今日三大法人資料暫無（${code}），盤後約18:30更新。<br>
+      el.innerHTML=`<div class="notice">查無 ${code} 法人資料（${usedDate}）<br>
+        可能原因：1.今日未交易 2.此ETF非上市類<br>
         <a href="https://www.twse.com.tw/zh/trading/fund/T86.html" target="_blank" style="color:var(--blue)">前往TWSE查詢 →</a></div>`;
       return;
     }
@@ -556,142 +590,281 @@ async function fetchInst(code){
   }
 }
 
-// ── ETF進出10日柱狀圖（雙軸：權重+日變化）───────
+// ── ETF進出圖：所有ETF權重合併成一張多線圖 ──────
 function buildCharts(s){
-  const etfCodes=[...new Set((s.etfs||[]).map(e=>e.etf))];
-  const dates=Object.keys(HIST).sort().slice(-10);
+  const body = document.getElementById('dp-body');
+  const etfCodes = [...new Set((s.etfs||[]).map(e=>e.etf))];
+  const dates    = Object.keys(HIST).sort().slice(-10);
 
-  if(!dates.length){
-    document.getElementById('dp-body').innerHTML=
-      '<div class="notice">歷史資料不足，需累積至少2天資料後才能顯示圖表。</div>';
+  if(!dates.length || !etfCodes.length){
+    body.innerHTML = '<div class="notice">歷史資料不足，需累積至少2天後顯示圖表。</div>';
     return;
   }
 
-  etfCodes.forEach(ec=>{
-    const canvasId=`ec-${ec}-${s.code}`;
-    const labels=[],weights=[],wchgs=[],barColors=[];
+  const labels = dates.map(d => d.slice(5));
 
-    dates.forEach(date=>{
-      const h=((HIST[date]||{})[ec]||[]).find(h=>h.code===s.code);
-      labels.push(date.slice(5));
-      weights.push(h?+Number(h.weight).toFixed(2):0);
+  const LINE_COLORS = [
+    '#22c55e','#60a5fa','#f59e0b','#a78bfa','#ef4444',
+    '#22d3ee','#fb923c','#f472b6','#a3e635','#94a3b8',
+  ];
+
+  // 每支ETF一條折線
+  const datasets = etfCodes.map((ec, idx) => {
+    const weights = dates.map(date => {
+      const holdings = ((HIST[date]||{})[ec]||[]);
+      const h = holdings.find(h => h.code === s.code);
+      return h ? +Number(h.weight).toFixed(2) : null;
     });
+    const color = LINE_COLORS[idx % LINE_COLORS.length];
+    return {
+      label: ec,
+      data: weights,
+      borderColor: color,
+      backgroundColor: color + '22',
+      pointBackgroundColor: weights.map(v =>
+        v == null ? 'transparent' : color
+      ),
+      pointRadius: 5,
+      pointHoverRadius: 7,
+      borderWidth: 2,
+      tension: 0.3,
+      spanGaps: false,
+      fill: false,
+    };
+  });
 
-    // 計算日變化 pp
-    for(let i=0;i<weights.length;i++){
-      if(i===0){wchgs.push(null);}
-      else{wchgs.push(+(weights[i]-weights[i-1]).toFixed(2));}
-      barColors.push(weights[i]>0?'rgba(34,197,94,.65)':'rgba(239,68,68,.35)');
-    }
+  // 今日各ETF最新權重摘要
+  const summaryRows = etfCodes.map((ec, idx) => {
+    const color = LINE_COLORS[idx % LINE_COLORS.length];
+    const etfEntry = (s.etfs||[]).find(e => e.etf === ec);
+    const w     = etfEntry ? Number(etfEntry.weight).toFixed(2)    : '—';
+    const wchg  = etfEntry && etfEntry.wchg != null
+                  ? (etfEntry.wchg > 0 ? '+' : '') + Number(etfEntry.wchg).toFixed(2) + 'pp'
+                  : '—';
+    const wCls  = etfEntry && etfEntry.wchg != null
+                  ? (etfEntry.wchg > 0 ? 'up' : etfEntry.wchg < 0 ? 'down' : 'flat')
+                  : 'flat';
+    const act   = etfEntry ? (ACT_LBL[etfEntry.action] || '—') : '—';
+    const actCls= etfEntry ? ('act-' + (ACT_CSS[etfEntry.action]||'hold')) : '';
+    const rk    = etfEntry && etfEntry.rank ? etfEntry.rank : '';
+    return `<tr>
+      <td><span style="display:inline-block;width:10px;height:10px;border-radius:50%;
+                       background:${color};margin-right:4px;vertical-align:middle;"></span>
+          <span style="font-family:var(--mono);font-weight:600">${ec}</span></td>
+      <td style="font-size:10px;color:var(--text2)">${(s.etfs||[]).find(e=>e.etf===ec)?.etf_name||''}</td>
+      <td class="${actCls}">${act}</td>
+      <td><span class="rk ${rk.includes('3')||rk==='TOP1'||rk==='TOP2'?'t3':rk==='TOP4'||rk==='TOP5'?'t5':rk?'t10':''}">${rk||'—'}</span></td>
+      <td style="font-family:var(--mono);text-align:right;font-weight:600">${w}%</td>
+      <td class="${wCls}" style="font-family:var(--mono);text-align:right;font-weight:700">${wchg}</td>
+    </tr>`;
+  }).join('');
 
-    setTimeout(()=>{
-      const ctx=document.getElementById(canvasId);
-      if(!ctx) return;
-      const existing=Chart.getChart(ctx);
-      if(existing) existing.destroy();
-      dpCharts[canvasId]=new Chart(ctx,{
-        type:'bar',
-        data:{
-          labels,
-          datasets:[
-            {
-              type:'bar',
-              label:'持倉權重(%)',
-              data:weights,
-              backgroundColor:barColors,
-              borderColor:barColors.map(c=>c.replace('.65','1').replace('.35','.7')),
-              borderWidth:1,
-              borderRadius:3,
-              yAxisID:'y',
-            },
-            {
-              type:'line',
-              label:'日變化(pp)',
-              data:wchgs,
-              borderColor:'rgba(96,165,250,.85)',
-              backgroundColor:'transparent',
-              pointBackgroundColor:wchgs.map(v=>v==null?'transparent':v>0?'#22c55e':'#ef4444'),
-              pointRadius:4,
-              borderWidth:1.5,
-              tension:0.3,
-              spanGaps:true,
-              yAxisID:'y2',
+  const canvasId = 'etf-multi-chart-' + s.code;
+
+  body.innerHTML = `
+    <div class="sub2" style="font-family:var(--mono);font-size:10px;color:var(--text3);
+         letter-spacing:.5px;text-transform:uppercase;margin:0 0 6px;
+         padding-bottom:4px;border-bottom:1px solid var(--border);">
+      各ETF持倉權重（近10日）
+    </div>
+
+    <!-- 合併多線圖 -->
+    <div style="background:var(--bg3);border-radius:6px;padding:12px;margin-bottom:12px;position:relative;">
+      <canvas id="${canvasId}" height="200"></canvas>
+    </div>
+
+    <!-- 今日各ETF摘要表 -->
+    <div class="sub2" style="font-family:var(--mono);font-size:10px;color:var(--text3);
+         letter-spacing:.5px;text-transform:uppercase;margin:0 0 6px;
+         padding-bottom:4px;border-bottom:1px solid var(--border);">
+      今日各ETF持倉狀況
+    </div>
+    <div style="overflow-x:auto;border-radius:5px;border:1px solid var(--border);margin-bottom:12px;">
+      <table class="tbl2" style="margin:0">
+        <thead><tr>
+          <th>ETF代號</th><th>ETF名稱</th><th>動作</th>
+          <th>排名</th><th style="text-align:right">今日權重</th>
+          <th style="text-align:right">變化(pp)</th>
+        </tr></thead>
+        <tbody>${summaryRows}</tbody>
+      </table>
+    </div>`;
+
+  // 渲染圖表
+  setTimeout(() => {
+    const ctx = document.getElementById(canvasId);
+    if (!ctx) return;
+    const existing = Chart.getChart(ctx);
+    if (existing) existing.destroy();
+
+    dpCharts[canvasId] = new Chart(ctx, {
+      type: 'line',
+      data: { labels, datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: {
+            position: 'top',
+            labels: {
+              color: '#8b92a8',
+              font: { size: 10 },
+              padding: 10,
+              boxWidth: 12,
+              usePointStyle: true,
+              pointStyle: 'circle',
             }
-          ]
-        },
-        options:{
-          responsive:true,
-          interaction:{mode:'index',intersect:false},
-          plugins:{
-            legend:{labels:{color:'#8b92a8',font:{size:10}}},
-            tooltip:{callbacks:{
-              label:c=>{
-                const v=c.parsed.y;
-                if(v==null) return null;
-                return c.dataset.label+': '+(c.datasetIndex===0?Number(v).toFixed(2)+'%':(v>0?'+':'')+Number(v).toFixed(2)+'pp');
-              }
-            }}
           },
-          scales:{
-            x:{ticks:{color:'#555e72',font:{size:10}},grid:{color:'#252a35'}},
-            y:{
-              position:'left',
-              beginAtZero:true,
-              ticks:{color:'#555e72',font:{size:10},callback:v=>v+'%'},
-              grid:{color:'#252a35'},
-            },
-            y2:{
-              position:'right',
-              ticks:{color:'#60a5fa',font:{size:10},callback:v=>(v>0?'+':'')+v+'pp'},
-              grid:{display:false},
+          tooltip: {
+            callbacks: {
+              label: c => {
+                const v = c.parsed.y;
+                if (v == null) return null;
+                return ` ${c.dataset.label}: ${Number(v).toFixed(2)}%`;
+              }
             }
           }
+        },
+        scales: {
+          x: {
+            ticks: { color: '#555e72', font: { size: 10 } },
+            grid:  { color: '#252a35' },
+          },
+          y: {
+            beginAtZero: true,
+            ticks: {
+              color: '#555e72',
+              font:  { size: 10 },
+              callback: v => v + '%',
+            },
+            grid: { color: '#252a35' },
+          }
         }
-      });
-    },80);
-  });
+      }
+    });
+  }, 80);
 }
-
-// ── 近期新聞 & 大事記（Google News RSS）─────────
+// ── 近期新聞（多備援來源）──────────────────────
 async function fetchNews(s){
-  const body=document.getElementById('dp-body');
-  try{
-    const q=encodeURIComponent(`${s.code} ${s.name||''} 台股`);
-    const rss=`https://news.google.com/rss/search?q=${q}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant`;
-    const proxy=`https://api.allorigins.win/raw?url=${encodeURIComponent(rss)}`;
-    const r=await fetch(proxy,{signal:AbortSignal.timeout(12000)});
-    const xml=new DOMParser().parseFromString(await r.text(),'application/xml');
-    const items=[...xml.querySelectorAll('item')].slice(0,10);
+  const body = document.getElementById('dp-body');
+  const code = s.code || '';
+  const name = s.name || '';
+  const query = encodeURIComponent(`${code} ${name} 台股`);
 
-    if(!items.length) throw new Error('無新聞結果');
+  body.innerHTML = '<div class="loading-screen"><span>搜尋新聞中...</span></div>';
 
-    const newsHtml=items.map(item=>{
-      const title=item.querySelector('title')?.textContent||'';
-      const link=item.querySelector('link')?.textContent||'#';
-      const pub=item.querySelector('pubDate')?.textContent||'';
-      const src=item.querySelector('source')?.textContent||'';
-      const dateStr=pub?new Date(pub).toLocaleDateString('zh-TW'):'';
-      return `<div style="padding:7px 0;border-bottom:1px solid var(--border);">
-        <a href="${link}" target="_blank" rel="noopener"
-           style="color:var(--blue);text-decoration:none;font-size:12px;line-height:1.5;">${title}</a>
-        <div style="font-family:var(--mono);font-size:9px;color:var(--text3);margin-top:2px;">${dateStr}${src?' · '+src:''}</div>
-      </div>`;
-    }).join('');
+  // 備援來源順序：rss2json → allorigins → 直接連結
+  const rssSrc = `https://news.google.com/rss/search?q=${query}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant`;
 
-    body.innerHTML=`
-      <div class="sub2" style="font-family:var(--mono);font-size:10px;color:var(--text3);letter-spacing:.5px;text-transform:uppercase;margin:0 0 6px;padding-bottom:4px;border-bottom:1px solid var(--border);">
-        近期相關新聞（${s.code} ${s.name||''}）
+  const proxies = [
+    `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(rssSrc)}&count=10`,
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(rssSrc)}`,
+    `https://corsproxy.io/?${encodeURIComponent(rssSrc)}`,
+  ];
+
+  let items = [];
+
+  // 嘗試 rss2json（回傳 JSON，最穩定）
+  try {
+    const r = await fetch(proxies[0], { signal: AbortSignal.timeout(10000) });
+    const data = await r.json();
+    if (data.status === 'ok' && data.items && data.items.length) {
+      items = data.items.slice(0, 10).map(item => ({
+        title:  item.title || '',
+        link:   item.link  || '#',
+        date:   item.pubDate ? new Date(item.pubDate).toLocaleDateString('zh-TW') : '',
+        source: item.author || '',
+      }));
+    }
+  } catch(e) { /* 繼續嘗試下一個 */ }
+
+  // 備援：allorigins（回傳 XML）
+  if (!items.length) {
+    for (const proxy of proxies.slice(1)) {
+      try {
+        const r = await fetch(proxy, { signal: AbortSignal.timeout(10000) });
+        const text = await r.text();
+        const xml  = new DOMParser().parseFromString(text, 'application/xml');
+        const nodes = [...xml.querySelectorAll('item')].slice(0, 10);
+        if (nodes.length) {
+          items = nodes.map(item => ({
+            title:  item.querySelector('title')?.textContent   || '',
+            link:   item.querySelector('link')?.textContent    || '#',
+            date:   item.querySelector('pubDate')?.textContent
+                    ? new Date(item.querySelector('pubDate').textContent).toLocaleDateString('zh-TW')
+                    : '',
+            source: item.querySelector('source')?.textContent || '',
+          }));
+          break;
+        }
+      } catch(e) { /* 繼續 */ }
+    }
+  }
+
+  // 顯示結果
+  if (items.length) {
+    const newsHtml = items.map(item => `
+      <div style="padding:8px 0;border-bottom:1px solid var(--border);">
+        <a href="${item.link}" target="_blank" rel="noopener"
+           style="color:var(--blue);text-decoration:none;font-size:12px;line-height:1.6;">
+          ${item.title}
+        </a>
+        <div style="font-family:var(--mono);font-size:9px;color:var(--text3);margin-top:2px;">
+          ${item.date}${item.source ? ' · ' + item.source : ''}
+        </div>
+      </div>`).join('');
+
+    body.innerHTML = `
+      <div class="sub2" style="font-family:var(--mono);font-size:10px;color:var(--text3);
+           letter-spacing:.5px;text-transform:uppercase;margin:0 0 8px;
+           padding-bottom:4px;border-bottom:1px solid var(--border);">
+        近期相關新聞（${code} ${name}）
       </div>
       ${newsHtml}
-      <div style="text-align:center;margin-top:10px;">
-        <a href="https://news.google.com/search?q=${encodeURIComponent((s.code||'')+' '+(s.name||''))}&hl=zh-TW"
-           target="_blank" style="color:var(--blue);font-size:11px;">更多新聞 →</a>
+      <div style="text-align:center;margin-top:12px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">
+        <a href="https://news.google.com/search?q=${query}&hl=zh-TW"
+           target="_blank"
+           style="color:var(--blue);font-size:11px;font-family:var(--mono);">
+          Google 新聞 →
+        </a>
+        <a href="https://tw.stock.yahoo.com/quote/${code}/news"
+           target="_blank"
+           style="color:var(--blue);font-size:11px;font-family:var(--mono);">
+          Yahoo 股市新聞 →
+        </a>
+        <a href="https://www.cnyes.com/twstock/ps_page/${code}"
+           target="_blank"
+           style="color:var(--blue);font-size:11px;font-family:var(--mono);">
+          鉅亨網 →
+        </a>
       </div>`;
-  } catch(e){
-    body.innerHTML=`<div class="notice">新聞載入失敗（${e.message}）</div>
-      <div style="text-align:center;margin-top:10px;">
-        <a href="https://news.google.com/search?q=${encodeURIComponent((s.code||'')+' '+(s.name||''))}&hl=zh-TW"
-           target="_blank" style="color:var(--blue)">前往 Google 新聞查詢 →</a>
+  } else {
+    // 全部失敗 → 顯示外部連結
+    body.innerHTML = `
+      <div class="notice">新聞自動載入失敗，請點選以下連結查詢：</div>
+      <div style="display:flex;flex-direction:column;gap:10px;margin-top:10px;">
+        <a href="https://news.google.com/search?q=${query}&hl=zh-TW"
+           target="_blank"
+           style="display:flex;align-items:center;gap:8px;background:var(--bg3);
+                  border:1px solid var(--border);border-radius:6px;padding:10px 14px;
+                  color:var(--blue);text-decoration:none;font-size:12px;">
+          📰 Google 新聞：${code} ${name}
+        </a>
+        <a href="https://tw.stock.yahoo.com/quote/${code}/news"
+           target="_blank"
+           style="display:flex;align-items:center;gap:8px;background:var(--bg3);
+                  border:1px solid var(--border);border-radius:6px;padding:10px 14px;
+                  color:var(--blue);text-decoration:none;font-size:12px;">
+          📰 Yahoo 股市：${code} ${name}
+        </a>
+        <a href="https://www.cnyes.com/twstock/ps_page/${code}"
+           target="_blank"
+           style="display:flex;align-items:center;gap:8px;background:var(--bg3);
+                  border:1px solid var(--border);border-radius:6px;padding:10px 14px;
+                  color:var(--blue);text-decoration:none;font-size:12px;">
+          📰 鉅亨網：${code} ${name}
+        </a>
       </div>`;
   }
 }

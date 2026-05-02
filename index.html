@@ -120,13 +120,6 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:13
   <div class="nav-tab" onclick="showTab('ai',this)">🤖 AI經理人分析</div>
 </div>
 
-<!-- 日期選擇列 -->
-<div id="date-bar" style="display:flex;align-items:center;gap:8px;padding:7px 16px;
-     background:var(--bg2);border-bottom:1px solid var(--border);overflow-x:auto;flex-wrap:wrap;">
-  <span style="font-family:var(--mono);font-size:10px;color:var(--text3);white-space:nowrap;">📅 觀看日期：</span>
-  <div id="date-btns" style="display:flex;gap:5px;flex-wrap:wrap;"></div>
-</div>
-
 <!-- Sumbar -->
 <div class="sumbar" id="sumbar"></div>
 
@@ -201,8 +194,6 @@ let activeCode=null, dpTab='basic', mainTab='radar', activeEtf=null;
 let aiHistory=[], dpCharts={};
 
 // ── 載入資料 ──
-let SELECTED_DATE = null;  // null = 最新日期
-
 async function init(){
   try{
     const [r1,r2] = await Promise.all([
@@ -212,7 +203,6 @@ async function init(){
     if(!r1.ok) throw new Error('holdings.json 載入失敗');
     G = await r1.json();
     if(r2.ok) HIST = await r2.json();
-    buildDateBar();
     render();
   } catch(e){
     document.getElementById('radar-content').innerHTML=
@@ -220,169 +210,13 @@ async function init(){
   }
 }
 
-// ── 建立日期選擇列 ────────────────────────────
-function buildDateBar(){
-  const dates = Object.keys(HIST).sort().reverse().slice(0, 10);
-  if(!dates.length){
-    document.getElementById('date-bar').style.display = 'none';
-    return;
-  }
-
-  // 預設選最新日期
-  SELECTED_DATE = dates[0];
-
-  const btns = dates.map((date, idx) => {
-    const label = date.slice(5); // MM-DD
-    const isLatest = idx === 0;
-    return `<button id="dbtn-${date}" onclick="selectDate('${date}')"
-      style="font-family:var(--mono);font-size:10px;padding:3px 10px;border-radius:4px;
-             cursor:pointer;border:1px solid var(--border);transition:.15s;white-space:nowrap;
-             background:${isLatest?'var(--bbg)':'var(--bg3)'};
-             color:${isLatest?'var(--blue)':'var(--text2)'};
-             border-color:${isLatest?'var(--blue)':'var(--border)'};">
-      ${isLatest?'今日 ':''}${label}
-    </button>`;
-  }).join('');
-
-  document.getElementById('date-btns').innerHTML = btns;
-}
-
-function selectDate(date){
-  SELECTED_DATE = date;
-
-  // 更新按鈕樣式
-  document.querySelectorAll('[id^="dbtn-"]').forEach(b => {
-    const isActive = b.id === 'dbtn-' + date;
-    b.style.background    = isActive ? 'var(--bbg)'    : 'var(--bg3)';
-    b.style.color         = isActive ? 'var(--blue)'   : 'var(--text2)';
-    b.style.borderColor   = isActive ? 'var(--blue)'   : 'var(--border)';
-  });
-
-  // 重新計算並渲染
-  renderByDate(date);
-  closeDP();
-}
-
-// ── 根據選定日期重新計算 ──────────────────────
-function renderByDate(date){
-  const dates = Object.keys(HIST).sort();
-  const idx   = dates.indexOf(date);
-  const prevDate = idx > 0 ? dates[idx - 1] : date;
-
-  const today_data     = HIST[date]     || {};
-  const yesterday_data = HIST[prevDate] || {};
-
-  // 沿用 G 的結構，重新計算 buy/new/sell
-  const all_codes = new Set();
-  Object.values(today_data).forEach(holdings =>
-    holdings.forEach(h => all_codes.add(h.code))
-  );
-
-  // 判斷哪些ETF有更新
-  const fresh_etfs = Object.keys(today_data).filter(ec => {
-    const t = today_data[ec]     || [];
-    const y = yesterday_data[ec] || [];
-    if(!t.length) return false;
-    if(!y.length) return true;
-    const ts = new Set(t.map(h => h.code+'_'+Math.round(h.weight*100)));
-    const ys = new Set(y.map(h => h.code+'_'+Math.round(h.weight*100)));
-    return [...ts].some(v => !ys.has(v)) || [...ys].some(v => !ts.has(v));
-  });
-
-  // 計算 stock_map
-  const stock_map   = {};
-  const removed_list = [];
-
-  for(const ec of fresh_etfs){
-    const holdings = today_data[ec]     || [];
-    const prev     = Object.fromEntries((yesterday_data[ec]||[]).map(h=>[h.code,h]));
-    const today_set= new Set(holdings.map(h=>h.code));
-    const etf_name = (G.etf_detail||{})[ec]?.etf_name || ec;
-
-    for(const h of holdings){
-      const sc    = h.code; if(!sc) continue;
-      const w_now = h.weight;
-      const w_prev= prev[sc]?.weight ?? null;
-      const is_new= !(sc in prev);
-      const wchg  = w_prev !== null ? Math.round((w_now - w_prev)*100)/100 : null;
-      const rk    = h.rank || 99;
-      const rank_label = rk<=3?'TOP3':rk<=5?'TOP5':rk<=10?'TOP10':'';
-      const action= is_new?'new-in': wchg!==null&&wchg<0?'reduce': wchg!==null&&wchg>0?'add':'hold';
-
-      if(!(sc in stock_map)){
-        stock_map[sc] = {
-          code:sc, name:h.name||STOCK_NAMES[sc]||sc,
-          industry:h.industry||'其他',
-          price:h.price||null, chg:h.chg||null, chg_pct:h.chg_pct||null,
-          etfs:[], total_wchg:0,
-          cat: is_new?'new':'buy',
-        };
-      }
-      stock_map[sc].etfs.push({
-        etf:ec, etf_name, action, rank:rank_label, rank_num:rk,
-        wchg, weight:w_now, prev_weight:w_prev, shares:h.shares||'0',
-      });
-      if(wchg!==null) stock_map[sc].total_wchg = Math.round((stock_map[sc].total_wchg+wchg)*100)/100;
-    }
-
-    // 剔除
-    for(const [sc, h] of Object.entries(prev)){
-      if(!today_set.has(sc)){
-        removed_list.push({
-          code:sc, name:h.name||sc, industry:h.industry||'其他',
-          etf:ec, etf_name,
-          prev_weight:h.weight,
-          wchg: Math.round(-h.weight*100)/100,
-          price:null, chg_pct:null,
-        });
-      }
-    }
-  }
-
-  // 分類
-  const buy=[], new_in=[], sell=[];
-  for(const s of Object.values(stock_map)){
-    const actions = s.etfs.map(e=>e.action);
-    const n = s.etfs.length;
-    if(actions.every(a=>a==='reduce'||a==='hold') && actions.some(a=>a==='reduce')) s.cat='sell';
-    else if(actions.includes('new-in') && n===1) s.cat='new';
-    else if(n>=2) s.cat='buy';
-    if(s.cat==='sell') sell.push(s);
-    else if(s.cat==='new') new_in.push(s);
-    else buy.push(s);
-  }
-  buy.sort((a,b)=>(-b.etfs.length+a.etfs.length)||Math.abs(b.total_wchg)-Math.abs(a.total_wchg));
-  new_in.sort((a,b)=>(-b.etfs.length+a.etfs.length)||Math.abs(b.total_wchg)-Math.abs(a.total_wchg));
-  sell.sort((a,b)=>a.total_wchg-b.total_wchg);
-
-  // 更新全域 STOCKS
-  STOCKS = {};
-  [...buy,...new_in,...sell].forEach(s=>STOCKS[s.code]=s);
-
-  // 更新 G 的 buy/new/sell/removed
-  G.generated_at  = date;
-  G.compare_date  = prevDate;
-  G.buy           = buy.slice(0,20);
-  G.new           = new_in.slice(0,15);
-  G.sell          = sell.slice(0,10);
-  G.removed       = removed_list.sort((a,b)=>b.prev_weight-a.prev_weight);
-  G.fresh_etfs    = fresh_etfs;
-  G.fresh_etf_count = fresh_etfs.length;
-  G.stale_etfs    = Object.keys(today_data).filter(ec=>!fresh_etfs.includes(ec));
-
-  render();
-}
-
-// 股名備援
-const STOCK_NAMES = {};
-
 // ── 主渲染 ──
 function render(){
   const {buy=[],new:nw=[],sell=[],removed=[],stale_etfs=[]} = G;
   [...buy,...nw,...sell].forEach(s=>STOCKS[s.code]=s);
 
   document.getElementById('topbar-date').innerHTML=
-    `觀看日期 <b>${G.generated_at||'—'}</b> vs 前日 ${G.compare_date||'—'}`;
+    `<b>${G.generated_at||'—'}</b> vs ${G.compare_date||'—'}`;
 
   document.getElementById('sumbar').innerHTML=[
     chip('b','共同買進',buy.length,'檔'),

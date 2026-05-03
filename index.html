@@ -120,6 +120,13 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);font-size:13
   <div class="nav-tab" onclick="showTab('ai',this)">🤖 AI經理人分析</div>
 </div>
 
+<!-- 日期選擇列 -->
+<div id="date-bar" style="display:flex;align-items:center;gap:8px;padding:7px 16px;
+     background:var(--bg2);border-bottom:1px solid var(--border);overflow-x:auto;flex-wrap:wrap;">
+  <span style="font-family:var(--mono);font-size:10px;color:var(--text3);white-space:nowrap;">📅 觀看日期：</span>
+  <div id="date-btns" style="display:flex;gap:5px;flex-wrap:wrap;"></div>
+</div>
+
 <!-- Sumbar -->
 <div class="sumbar" id="sumbar"></div>
 
@@ -190,10 +197,12 @@ const ACT_LBL = {add:'加碼','new-in':'新進',reduce:'減碼',removed:'剔除'
 const ACT_CSS = {add:'add','new-in':'new-in',reduce:'reduce',removed:'removed',hold:'hold'};
 
 let G={}, HIST={}, STOCKS={};
-let activeCode=null, dpTab='basic', mainTab='radar', activeEtf=null;
+let activeCode=null, dpTab='kline', mainTab='radar', activeEtf=null;
 let aiHistory=[], dpCharts={};
 
 // ── 載入資料 ──
+let SELECTED_DATE = null;  // null = 最新日期
+
 async function init(){
   try{
     const [r1,r2] = await Promise.all([
@@ -203,6 +212,7 @@ async function init(){
     if(!r1.ok) throw new Error('holdings.json 載入失敗');
     G = await r1.json();
     if(r2.ok) HIST = await r2.json();
+    buildDateBar();
     render();
   } catch(e){
     document.getElementById('radar-content').innerHTML=
@@ -210,13 +220,169 @@ async function init(){
   }
 }
 
+// ── 建立日期選擇列 ────────────────────────────
+function buildDateBar(){
+  const dates = Object.keys(HIST).sort().reverse().slice(0, 10);
+  if(!dates.length){
+    document.getElementById('date-bar').style.display = 'none';
+    return;
+  }
+
+  // 預設選最新日期
+  SELECTED_DATE = dates[0];
+
+  const btns = dates.map((date, idx) => {
+    const label = date.slice(5); // MM-DD
+    const isLatest = idx === 0;
+    return `<button id="dbtn-${date}" onclick="selectDate('${date}')"
+      style="font-family:var(--mono);font-size:10px;padding:3px 10px;border-radius:4px;
+             cursor:pointer;border:1px solid var(--border);transition:.15s;white-space:nowrap;
+             background:${isLatest?'var(--bbg)':'var(--bg3)'};
+             color:${isLatest?'var(--blue)':'var(--text2)'};
+             border-color:${isLatest?'var(--blue)':'var(--border)'};">
+      ${isLatest?'今日 ':''}${label}
+    </button>`;
+  }).join('');
+
+  document.getElementById('date-btns').innerHTML = btns;
+}
+
+function selectDate(date){
+  SELECTED_DATE = date;
+
+  // 更新按鈕樣式
+  document.querySelectorAll('[id^="dbtn-"]').forEach(b => {
+    const isActive = b.id === 'dbtn-' + date;
+    b.style.background    = isActive ? 'var(--bbg)'    : 'var(--bg3)';
+    b.style.color         = isActive ? 'var(--blue)'   : 'var(--text2)';
+    b.style.borderColor   = isActive ? 'var(--blue)'   : 'var(--border)';
+  });
+
+  // 重新計算並渲染
+  renderByDate(date);
+  closeDP();
+}
+
+// ── 根據選定日期重新計算 ──────────────────────
+function renderByDate(date){
+  const dates = Object.keys(HIST).sort();
+  const idx   = dates.indexOf(date);
+  const prevDate = idx > 0 ? dates[idx - 1] : date;
+
+  const today_data     = HIST[date]     || {};
+  const yesterday_data = HIST[prevDate] || {};
+
+  // 沿用 G 的結構，重新計算 buy/new/sell
+  const all_codes = new Set();
+  Object.values(today_data).forEach(holdings =>
+    holdings.forEach(h => all_codes.add(h.code))
+  );
+
+  // 判斷哪些ETF有更新
+  const fresh_etfs = Object.keys(today_data).filter(ec => {
+    const t = today_data[ec]     || [];
+    const y = yesterday_data[ec] || [];
+    if(!t.length) return false;
+    if(!y.length) return true;
+    const ts = new Set(t.map(h => h.code+'_'+Math.round(h.weight*100)));
+    const ys = new Set(y.map(h => h.code+'_'+Math.round(h.weight*100)));
+    return [...ts].some(v => !ys.has(v)) || [...ys].some(v => !ts.has(v));
+  });
+
+  // 計算 stock_map
+  const stock_map   = {};
+  const removed_list = [];
+
+  for(const ec of fresh_etfs){
+    const holdings = today_data[ec]     || [];
+    const prev     = Object.fromEntries((yesterday_data[ec]||[]).map(h=>[h.code,h]));
+    const today_set= new Set(holdings.map(h=>h.code));
+    const etf_name = (G.etf_detail||{})[ec]?.etf_name || ec;
+
+    for(const h of holdings){
+      const sc    = h.code; if(!sc) continue;
+      const w_now = h.weight;
+      const w_prev= prev[sc]?.weight ?? null;
+      const is_new= !(sc in prev);
+      const wchg  = w_prev !== null ? Math.round((w_now - w_prev)*100)/100 : null;
+      const rk    = h.rank || 99;
+      const rank_label = rk<=3?'TOP3':rk<=5?'TOP5':rk<=10?'TOP10':'';
+      const action= is_new?'new-in': wchg!==null&&wchg<0?'reduce': wchg!==null&&wchg>0?'add':'hold';
+
+      if(!(sc in stock_map)){
+        stock_map[sc] = {
+          code:sc, name:h.name||STOCK_NAMES[sc]||sc,
+          industry:h.industry||'其他',
+          price:h.price||null, chg:h.chg||null, chg_pct:h.chg_pct||null,
+          etfs:[], total_wchg:0,
+          cat: is_new?'new':'buy',
+        };
+      }
+      stock_map[sc].etfs.push({
+        etf:ec, etf_name, action, rank:rank_label, rank_num:rk,
+        wchg, weight:w_now, prev_weight:w_prev, shares:h.shares||'0',
+      });
+      if(wchg!==null) stock_map[sc].total_wchg = Math.round((stock_map[sc].total_wchg+wchg)*100)/100;
+    }
+
+    // 剔除
+    for(const [sc, h] of Object.entries(prev)){
+      if(!today_set.has(sc)){
+        removed_list.push({
+          code:sc, name:h.name||sc, industry:h.industry||'其他',
+          etf:ec, etf_name,
+          prev_weight:h.weight,
+          wchg: Math.round(-h.weight*100)/100,
+          price:null, chg_pct:null,
+        });
+      }
+    }
+  }
+
+  // 分類
+  const buy=[], new_in=[], sell=[];
+  for(const s of Object.values(stock_map)){
+    const actions = s.etfs.map(e=>e.action);
+    const n = s.etfs.length;
+    if(actions.every(a=>a==='reduce'||a==='hold') && actions.some(a=>a==='reduce')) s.cat='sell';
+    else if(actions.includes('new-in') && n===1) s.cat='new';
+    else if(n>=2) s.cat='buy';
+    if(s.cat==='sell') sell.push(s);
+    else if(s.cat==='new') new_in.push(s);
+    else buy.push(s);
+  }
+  buy.sort((a,b)=>(-b.etfs.length+a.etfs.length)||Math.abs(b.total_wchg)-Math.abs(a.total_wchg));
+  new_in.sort((a,b)=>(-b.etfs.length+a.etfs.length)||Math.abs(b.total_wchg)-Math.abs(a.total_wchg));
+  sell.sort((a,b)=>a.total_wchg-b.total_wchg);
+
+  // 更新全域 STOCKS
+  STOCKS = {};
+  [...buy,...new_in,...sell].forEach(s=>STOCKS[s.code]=s);
+
+  // 更新 G 的 buy/new/sell/removed
+  G.generated_at  = date;
+  G.compare_date  = prevDate;
+  G.buy           = buy.slice(0,20);
+  G.new           = new_in.slice(0,15);
+  G.sell          = sell.slice(0,10);
+  G.removed       = removed_list.sort((a,b)=>b.prev_weight-a.prev_weight);
+  G.fresh_etfs    = fresh_etfs;
+  G.fresh_etf_count = fresh_etfs.length;
+  G.stale_etfs    = Object.keys(today_data).filter(ec=>!fresh_etfs.includes(ec));
+
+  render();
+}
+
+// 股名備援
+const STOCK_NAMES = {};
+
 // ── 主渲染 ──
 function render(){
   const {buy=[],new:nw=[],sell=[],removed=[],stale_etfs=[]} = G;
   [...buy,...nw,...sell].forEach(s=>STOCKS[s.code]=s);
 
   document.getElementById('topbar-date').innerHTML=
-    `<b>${G.generated_at||'—'}</b> vs ${G.compare_date||'—'}`;
+    `觀看日期 <b>${G.generated_at||'—'}</b> vs 前日 ${G.compare_date||'—'}`;
 
   document.getElementById('sumbar').innerHTML=[
     chip('b','共同買進',buy.length,'檔'),
@@ -314,10 +480,11 @@ function openDP(code){
 
   // 分頁標籤
   document.getElementById('dp-tabs').innerHTML=[
-    {k:'basic',lbl:'📊 基本資料'},
-    {k:'inst', lbl:'🏦 法人動向'},
-    {k:'chart',lbl:'📈 ETF進出圖'},
-    {k:'news', lbl:'📰 新聞/大事記'},
+    {k:'kline', lbl:'📈 K線圖'},
+    {k:'basic', lbl:'📋 基本資料'},
+    {k:'inst',  lbl:'🏦 法人動向'},
+    {k:'chart', lbl:'🔄 ETF進出圖'},
+    {k:'news',  lbl:'📰 新聞'},
   ].map(t=>`<div class="nav-tab ${dpTab===t.k?'active':''}" style="font-size:11px;padding:7px 14px;" onclick="setDPTab('${t.k}',this)">${t.lbl}</div>`).join('');
 
   document.getElementById('dp').style.display='block';
@@ -350,7 +517,11 @@ function loadDPTab(name){
   dpCharts={};
   const s=STOCKS[activeCode]||{};
   const body=document.getElementById('dp-body');
-  if(typeof renderBasic==='function'&&name==='basic') body.innerHTML=renderBasic(s);
+  if(name==='kline'){
+    body.innerHTML='<div class="loading-screen"><span>載入K線資料...</span></div>';
+    if(typeof initKline==='function') initKline(s.code, s.name||s.code);
+  }
+  else if(typeof renderBasic==='function'&&name==='basic') body.innerHTML=renderBasic(s);
   else if(typeof fetchInst==='function'&&name==='inst'){body.innerHTML='<div class="loading-screen"><span>連線 TWSE...</span></div><div id="inst-result"></div>';fetchInst(s.code);}
   else if(typeof buildCharts==='function'&&name==='chart'){body.innerHTML=chartSkeleton(s);buildCharts(s);}
   else if(typeof fetchNews==='function'&&name==='news'){body.innerHTML='<div class="loading-screen"><span>搜尋新聞...</span></div>';fetchNews(s);}
@@ -1288,3 +1459,357 @@ async function sendAI(){
 </script>
 </body>
 </html>
+
+<script>
+// ══════════════════════════════════════════════
+// Step A：K線圖 + 成交量 + 技術指標參數設定
+// ══════════════════════════════════════════════
+
+// ── 技術指標參數（可手動修改）────────────────
+let PARAMS = {
+  ma:   [5, 20, 60],        // MA 均線天數
+  kd_n: 9,                  // KD 週期
+  kd_m1: 3,                 // KD M1
+  kd_m2: 3,                 // KD M2
+  macd_fast: 12,            // MACD 快線
+  macd_slow: 26,            // MACD 慢線
+  macd_signal: 9,           // MACD 訊號線
+  vol_ma: 5,                // 成交量 MA 天數
+};
+
+const MA_COLORS = ['#f59e0b','#22c55e','#a78bfa','#f472b6','#22d3ee'];
+
+// ── 抓取 TWSE 歷史資料（近3個月）────────────
+async function fetchTWSEHistory(code){
+  const now   = new Date();
+  const allData = [];
+
+  // 抓近3個月資料
+  for(let i = 2; i >= 0; i--){
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const dateStr = d.getFullYear().toString()
+      + String(d.getMonth()+1).padStart(2,'0') + '01';
+    const url = `https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date=${dateStr}&stockNo=${code}`;
+    try{
+      const r = await fetch(url, {signal: AbortSignal.timeout(10000)});
+      const json = await r.json();
+      if(json.stat === 'OK' && json.data){
+        for(const row of json.data){
+          // row: [日期, 成交股數, 成交金額, 開盤價, 最高價, 最低價, 收盤價, 漲跌價差, 成交筆數]
+          const dateRaw = row[0]; // 民國年 e.g. "115/04/01"
+          const parts   = dateRaw.split('/');
+          const year     = parseInt(parts[0]) + 1911;
+          const dateISO  = `${year}-${parts[1]}-${parts[2]}`;
+          const open     = parseFloat(row[3].replace(/,/g,''));
+          const high     = parseFloat(row[4].replace(/,/g,''));
+          const low      = parseFloat(row[5].replace(/,/g,''));
+          const close    = parseFloat(row[6].replace(/,/g,''));
+          const vol      = parseInt(row[1].replace(/,/g,'')) / 1000; // 張
+          const amount   = parseInt(row[2].replace(/,/g,''));
+          const txCount  = parseInt(row[8].replace(/,/g,''));
+          if(!isNaN(open) && !isNaN(close)){
+            allData.push({date:dateISO, open, high, low, close, vol, amount, txCount});
+          }
+        }
+      }
+    } catch(e){ /* 略過該月 */ }
+  }
+  return allData;
+}
+
+// ── 計算 MA ───────────────────────────────────
+function calcMA(closes, n){
+  return closes.map((_, i) =>
+    i < n-1 ? null : closes.slice(i-n+1, i+1).reduce((a,b)=>a+b,0)/n
+  );
+}
+
+// ── 計算 KD（隨機指標）───────────────────────
+function calcKD(data, n, m1, m2){
+  const K=[], D=[], RSV=[];
+  let prevK=50, prevD=50;
+  for(let i=0;i<data.length;i++){
+    const slice = data.slice(Math.max(0,i-n+1), i+1);
+    const hh = Math.max(...slice.map(d=>d.high));
+    const ll  = Math.min(...slice.map(d=>d.low));
+    const rsv = hh===ll ? 50 : (data[i].close-ll)/(hh-ll)*100;
+    const k   = (prevK*(m1-1) + rsv) / m1;
+    const d   = (prevD*(m2-1) + k)   / m2;
+    RSV.push(+rsv.toFixed(2));
+    K.push(+k.toFixed(2));
+    D.push(+d.toFixed(2));
+    prevK=k; prevD=d;
+  }
+  return {K, D, RSV};
+}
+
+// ── 計算 MACD ────────────────────────────────
+function calcMACD(closes, fast, slow, signal){
+  function ema(arr, n){
+    const result=[];
+    let prev = arr.slice(0,n).reduce((a,b)=>a+b,0)/n;
+    for(let i=0;i<arr.length;i++){
+      if(i<n-1){ result.push(null); continue; }
+      if(i===n-1){ result.push(+prev.toFixed(4)); continue; }
+      prev = prev*(n-1)/(n+1) + arr[i]*2/(n+1);
+      result.push(+prev.toFixed(4));
+    }
+    return result;
+  }
+  const EMA_FAST   = ema(closes, fast);
+  const EMA_SLOW   = ema(closes, slow);
+  const DIF = EMA_FAST.map((f,i)=> f!=null&&EMA_SLOW[i]!=null ? +(f-EMA_SLOW[i]).toFixed(4) : null);
+  const difClean   = DIF.filter(v=>v!=null);
+  const sigRaw     = ema(difClean, signal);
+  // 補齊 null 前綴
+  const sigPadLen  = DIF.filter(v=>v==null).length;
+  const SIG = [...Array(sigPadLen).fill(null), ...sigRaw];
+  const HIST = DIF.map((d,i)=> d!=null&&SIG[i]!=null ? +(d-SIG[i]).toFixed(4) : null);
+  return {DIF, SIG, HIST};
+}
+
+// ── 主入口：初始化K線頁 ──────────────────────
+async function initKline(code, name){
+  const body = document.getElementById('dp-body');
+
+  // 先顯示參數設定 + 載入中
+  body.innerHTML = buildKlineParamUI(code, name)
+    + `<div id="kline-loading" class="loading-screen"><span>載入 ${code} 歷史資料...</span></div>`
+    + `<div id="kline-area" style="display:none;"></div>`;
+
+  const data = await fetchTWSEHistory(code);
+
+  document.getElementById('kline-loading').style.display='none';
+
+  if(!data.length){
+    document.getElementById('kline-area').innerHTML =
+      `<div class="notice">⚠ 無法取得 ${code} 歷史資料，請確認股票代號正確。</div>`;
+    document.getElementById('kline-area').style.display='';
+    return;
+  }
+
+  window._klineData = data; // 快取供重繪使用
+  window._klineCode = code;
+  window._klineName = name;
+  renderKline(data);
+}
+
+function buildKlineParamUI(code, name){
+  return `
+  <style>
+    .param-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+               padding:8px 12px;background:var(--bg3);border-radius:6px;
+               margin-bottom:10px;border:1px solid var(--border);}
+    .param-bar label{font-family:var(--mono);font-size:10px;color:var(--text3);white-space:nowrap;}
+    .param-input{background:var(--bg);border:1px solid var(--border2);border-radius:4px;
+                 color:var(--text);font-family:var(--mono);font-size:11px;
+                 padding:3px 6px;width:52px;text-align:center;outline:none;}
+    .param-input:focus{border-color:var(--cyan);}
+    .param-apply{background:var(--cyan);color:#000;border:none;border-radius:4px;
+                 padding:4px 12px;font-family:var(--mono);font-size:11px;
+                 font-weight:600;cursor:pointer;}
+    .param-apply:hover{opacity:.85;}
+    .param-divider{width:1px;height:20px;background:var(--border);flex-shrink:0;}
+    .kline-wrap{background:var(--bg3);border-radius:6px;padding:10px;margin-bottom:8px;}
+  </style>
+  <div class="param-bar">
+    <label>MA均線</label>
+    <input class="param-input" id="pm-ma1" value="${PARAMS.ma[0]}" title="MA1天數">
+    <input class="param-input" id="pm-ma2" value="${PARAMS.ma[1]}" title="MA2天數">
+    <input class="param-input" id="pm-ma3" value="${PARAMS.ma[2]}" title="MA3天數">
+    <div class="param-divider"></div>
+    <label>KD</label>
+    <input class="param-input" id="pm-kd-n"  value="${PARAMS.kd_n}"  title="KD週期N">
+    <input class="param-input" id="pm-kd-m1" value="${PARAMS.kd_m1}" title="KD M1">
+    <input class="param-input" id="pm-kd-m2" value="${PARAMS.kd_m2}" title="KD M2">
+    <div class="param-divider"></div>
+    <label>MACD</label>
+    <input class="param-input" id="pm-mf" value="${PARAMS.macd_fast}"   title="快線EMA">
+    <input class="param-input" id="pm-ms" value="${PARAMS.macd_slow}"   title="慢線EMA">
+    <input class="param-input" id="pm-mg" value="${PARAMS.macd_signal}" title="訊號線">
+    <div class="param-divider"></div>
+    <label>量MA</label>
+    <input class="param-input" id="pm-vm" value="${PARAMS.vol_ma}" title="成交量MA天數">
+    <button class="param-apply" onclick="applyParams()">套用</button>
+  </div>`;
+}
+
+function applyParams(){
+  const v = id => parseInt(document.getElementById(id)?.value)||0;
+  PARAMS.ma        = [v('pm-ma1'), v('pm-ma2'), v('pm-ma3')].filter(n=>n>0);
+  PARAMS.kd_n      = v('pm-kd-n')  || 9;
+  PARAMS.kd_m1     = v('pm-kd-m1') || 3;
+  PARAMS.kd_m2     = v('pm-kd-m2') || 3;
+  PARAMS.macd_fast = v('pm-mf')    || 12;
+  PARAMS.macd_slow = v('pm-ms')    || 26;
+  PARAMS.macd_signal = v('pm-mg')  || 9;
+  PARAMS.vol_ma    = v('pm-vm')    || 5;
+  if(window._klineData) renderKline(window._klineData);
+}
+
+function renderKline(data){
+  // 銷毀舊圖
+  Object.keys(dpCharts).forEach(k=>{
+    if(k.startsWith('kl-')){try{dpCharts[k].destroy();}catch(e){} delete dpCharts[k];}
+  });
+
+  const area = document.getElementById('kline-area');
+  area.style.display='';
+  area.innerHTML = `
+    <div class="kline-wrap" style="height:260px;"><canvas id="kl-main"></canvas></div>
+    <div class="kline-wrap" style="height:100px;"><canvas id="kl-vol"></canvas></div>`;
+
+  const labels  = data.map(d=>d.date.slice(5));
+  const closes  = data.map(d=>d.close);
+  const opens   = data.map(d=>d.open);
+  const highs   = data.map(d=>d.high);
+  const lows    = data.map(d=>d.low);
+  const vols    = data.map(d=>d.vol);
+
+  // MA 計算
+  const maDatasets = PARAMS.ma.map((n,i)=>({
+    label:`MA${n}`,
+    data: calcMA(closes, n),
+    borderColor: MA_COLORS[i],
+    backgroundColor:'transparent',
+    borderWidth:1.5,
+    pointRadius:0,
+    tension:0.3,
+    spanGaps:true,
+    type:'line',
+    yAxisID:'y',
+    order: 1,
+  }));
+
+  // K線（用自訂 float bar 模擬蠟燭）
+  const candleData = data.map(d=>({
+    x: d.date.slice(5),
+    o: d.open, h: d.high, l: d.low, c: d.close,
+  }));
+
+  // 漲跌顏色
+  const upColor   = 'rgba(239,68,68,.85)';
+  const downColor = 'rgba(34,197,94,.85)';
+  const candleColors = data.map(d=>d.close>=d.open?upColor:downColor);
+
+  // ── 主圖（K線模擬：用 bar 畫高低，line 畫開收）──
+  const chartMain = new Chart(document.getElementById('kl-main'),{
+    type:'bar',
+    data:{
+      labels,
+      datasets:[
+        // 影線（high-low）
+        {
+          label:'High-Low',
+          data: data.map(d=>d.high - d.low),
+          base: lows,
+          backgroundColor: candleColors,
+          borderWidth: 0,
+          barThickness: 1,
+          categoryPercentage: 0.3,
+          order: 3,
+          yAxisID:'y',
+        },
+        // 實體（open-close）
+        {
+          label:'Open-Close',
+          data: data.map(d=>Math.abs(d.close-d.open)||0.01),
+          base: data.map(d=>Math.min(d.open,d.close)),
+          backgroundColor: candleColors,
+          borderColor: candleColors,
+          borderWidth: 0.5,
+          categoryPercentage: 0.7,
+          barPercentage: 0.85,
+          order: 2,
+          yAxisID:'y',
+        },
+        ...maDatasets,
+      ]
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      animation:{duration:0},
+      interaction:{mode:'index',intersect:false},
+      plugins:{
+        legend:{
+          labels:{
+            color:'#8b92a8', font:{size:10},
+            filter: item => !['High-Low','Open-Close'].includes(item.text),
+          }
+        },
+        tooltip:{
+          callbacks:{
+            title: items => data[items[0].dataIndex]?.date||'',
+            label: item => {
+              const d=data[item.dataIndex];
+              if(!d) return null;
+              if(item.datasetIndex===0) return [
+                `開:${d.open}  高:${d.high}`,
+                `低:${d.low}  收:${d.close}`,
+                `漲跌:${+(d.close-d.open).toFixed(2)} (${+((d.close-d.open)/d.open*100).toFixed(2)}%)`,
+              ];
+              if(item.datasetIndex===1) return null;
+              return `${item.dataset.label}: ${item.parsed.y!=null?item.parsed.y.toFixed(2):'—'}`;
+            },
+            filter: item => item.datasetIndex !== 1,
+          }
+        }
+      },
+      scales:{
+        x:{ticks:{color:'#555e72',font:{size:9},maxRotation:0,autoSkip:true,maxTicksLimit:12},grid:{color:'#252a35'}},
+        y:{position:'right',ticks:{color:'#555e72',font:{size:9}},grid:{color:'#252a35'}},
+      }
+    }
+  });
+  dpCharts['kl-main'] = chartMain;
+
+  // ── 成交量圖 ─────────────────────────────────
+  const volMA = calcMA(vols, PARAMS.vol_ma);
+  const volColors = data.map(d=>d.close>=d.open?'rgba(239,68,68,.6)':'rgba(34,197,94,.6)');
+  const chartVol = new Chart(document.getElementById('kl-vol'),{
+    type:'bar',
+    data:{
+      labels,
+      datasets:[
+        {
+          label:'成交量(張)',
+          data:vols,
+          backgroundColor:volColors,
+          borderWidth:0,
+          barPercentage:0.85,
+          yAxisID:'y',
+          order:2,
+        },
+        {
+          type:'line',
+          label:`量MA${PARAMS.vol_ma}`,
+          data:volMA,
+          borderColor:'#f59e0b',
+          backgroundColor:'transparent',
+          pointRadius:0,
+          borderWidth:1.5,
+          spanGaps:true,
+          yAxisID:'y',
+          order:1,
+        }
+      ]
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      animation:{duration:0},
+      interaction:{mode:'index',intersect:false},
+      plugins:{
+        legend:{labels:{color:'#8b92a8',font:{size:10}}},
+        tooltip:{callbacks:{
+          label:item=> item.dataset.label+': '+(item.parsed.y!=null?Math.round(item.parsed.y).toLocaleString():'—')+(item.datasetIndex===0?'張':'')
+        }}
+      },
+      scales:{
+        x:{ticks:{color:'#555e72',font:{size:9},maxRotation:0,autoSkip:true,maxTicksLimit:12},grid:{color:'#252a35'}},
+        y:{position:'right',ticks:{color:'#555e72',font:{size:9},callback:v=>v>=1000?Math.round(v/1000)+'k':v},grid:{color:'#252a35'}},
+      }
+    }
+  });
+  dpCharts['kl-vol'] = chartVol;
+}
+</script>

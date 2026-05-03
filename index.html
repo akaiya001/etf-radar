@@ -1811,5 +1811,647 @@ function renderKline(data){
     }
   });
   dpCharts['kl-vol'] = chartVol;
+
+  // ── KD 副圖 ────────────────────────────────
+  const {K, D} = calcKD(data, PARAMS.kd_n, PARAMS.kd_m1, PARAMS.kd_m2);
+
+  // KD 超買超賣區塊 wrapper
+  const kdWrap = document.createElement('div');
+  kdWrap.className = 'kline-wrap';
+  kdWrap.style.height = '110px';
+  kdWrap.innerHTML = `<canvas id="kl-kd"></canvas>`;
+  area.appendChild(kdWrap);
+
+  const chartKD = new Chart(document.getElementById('kl-kd'),{
+    type:'line',
+    data:{
+      labels,
+      datasets:[
+        {
+          label:`K(${PARAMS.kd_n},${PARAMS.kd_m1})`,
+          data:K,
+          borderColor:'#f59e0b',
+          backgroundColor:'transparent',
+          pointRadius:0,
+          borderWidth:1.5,
+          tension:0.3,
+          spanGaps:true,
+        },
+        {
+          label:`D(${PARAMS.kd_m2})`,
+          data:D,
+          borderColor:'#60a5fa',
+          backgroundColor:'transparent',
+          pointRadius:0,
+          borderWidth:1.5,
+          tension:0.3,
+          spanGaps:true,
+        }
+      ]
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      animation:{duration:0},
+      interaction:{mode:'index',intersect:false},
+      plugins:{
+        legend:{labels:{color:'#8b92a8',font:{size:10}}},
+        tooltip:{callbacks:{
+          label:item=>`${item.dataset.label}: ${item.parsed.y!=null?item.parsed.y.toFixed(2):'—'}`
+        }},
+        annotation:{
+          annotations:{
+            ob:{type:'line',yMin:80,yMax:80,borderColor:'rgba(239,68,68,.4)',borderWidth:1,borderDash:[4,4]},
+            os:{type:'line',yMin:20,yMax:20,borderColor:'rgba(34,197,94,.4)',borderWidth:1,borderDash:[4,4]},
+          }
+        }
+      },
+      scales:{
+        x:{ticks:{color:'#555e72',font:{size:9},maxRotation:0,autoSkip:true,maxTicksLimit:12},grid:{color:'#252a35'}},
+        y:{
+          position:'right',
+          min:0, max:100,
+          ticks:{color:'#555e72',font:{size:9},stepSize:20},
+          grid:{color:'#252a35'},
+        },
+      }
+    }
+  });
+  dpCharts['kl-kd'] = chartKD;
+
+  // ── KD 超買超賣線（手動畫，不依賴 annotation plugin）──
+  // 已用 datasets 補充線
+  // 加入超買/超賣參考線 dataset
+  chartKD.data.datasets.push({
+    label:'超買80',
+    data: Array(labels.length).fill(80),
+    borderColor:'rgba(239,68,68,.35)',
+    borderDash:[4,4],
+    borderWidth:1,
+    pointRadius:0,
+    fill:false,
+  });
+  chartKD.data.datasets.push({
+    label:'超賣20',
+    data: Array(labels.length).fill(20),
+    borderColor:'rgba(34,197,94,.35)',
+    borderDash:[4,4],
+    borderWidth:1,
+    pointRadius:0,
+    fill:false,
+  });
+  chartKD.update('none');
+
+  // ── MACD 副圖 ──────────────────────────────
+  const {DIF, SIG, HIST:macdHist} = calcMACD(closes, PARAMS.macd_fast, PARAMS.macd_slow, PARAMS.macd_signal);
+
+  const macdWrap = document.createElement('div');
+  macdWrap.className = 'kline-wrap';
+  macdWrap.style.height = '110px';
+  macdWrap.innerHTML = `<canvas id="kl-macd"></canvas>`;
+  area.appendChild(macdWrap);
+
+  const histColors = macdHist.map(v => v==null?'transparent': v>=0?'rgba(239,68,68,.7)':'rgba(34,197,94,.7)');
+
+  const chartMACD = new Chart(document.getElementById('kl-macd'),{
+    type:'bar',
+    data:{
+      labels,
+      datasets:[
+        {
+          type:'bar',
+          label:'MACD柱',
+          data:macdHist,
+          backgroundColor:histColors,
+          borderWidth:0,
+          barPercentage:0.8,
+          yAxisID:'y',
+          order:3,
+        },
+        {
+          type:'line',
+          label:`DIF(${PARAMS.macd_fast},${PARAMS.macd_slow})`,
+          data:DIF,
+          borderColor:'#f59e0b',
+          backgroundColor:'transparent',
+          pointRadius:0,
+          borderWidth:1.5,
+          tension:0.3,
+          spanGaps:true,
+          yAxisID:'y',
+          order:1,
+        },
+        {
+          type:'line',
+          label:`DEA(${PARAMS.macd_signal})`,
+          data:SIG,
+          borderColor:'#60a5fa',
+          backgroundColor:'transparent',
+          pointRadius:0,
+          borderWidth:1.5,
+          tension:0.3,
+          spanGaps:true,
+          yAxisID:'y',
+          order:2,
+        }
+      ]
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      animation:{duration:0},
+      interaction:{mode:'index',intersect:false},
+      plugins:{
+        legend:{labels:{color:'#8b92a8',font:{size:10}}},
+        tooltip:{callbacks:{
+          label:item=>{
+            const v=item.parsed.y;
+            if(v==null) return null;
+            return `${item.dataset.label}: ${v.toFixed(4)}`;
+          }
+        }}
+      },
+      scales:{
+        x:{ticks:{color:'#555e72',font:{size:9},maxRotation:0,autoSkip:true,maxTicksLimit:12},grid:{color:'#252a35'}},
+        y:{position:'right',ticks:{color:'#555e72',font:{size:9},callback:v=>v.toFixed(2)},grid:{color:'#252a35'}},
+      }
+    }
+  });
+  dpCharts['kl-macd'] = chartMACD;
+
+  // ── 技術分析評分 ────────────────────────────
+  renderTechScore(data, K, D, DIF, SIG, macdHist);
+}
+
+// ── 技術分析評分函式 ─────────────────────────
+function renderTechScore(data, K, D, DIF, SIG, macdHist){
+  const last   = data.length - 1;
+  if(last < 0) return;
+
+  const close  = data[last].close;
+  const open   = data[last].open;
+  const high   = data[last].high;
+  const low    = data[last].low;
+  const vol    = data[last].vol;
+
+  const closes = data.map(d=>d.close);
+  const vols   = data.map(d=>d.vol);
+
+  // MA 計算
+  const maVals = PARAMS.ma.map(n=>{
+    const arr = calcMA(closes, n);
+    return arr[last];
+  });
+
+  // KD 最新值
+  const kVal = K[last], dVal = D[last];
+  const kPrev = K[last-1]||kVal, dPrev = D[last-1]||dVal;
+
+  // MACD 最新值
+  const difVal  = DIF[last],  sigVal = SIG[last], histVal = macdHist[last];
+  const histPrev= macdHist[last-1];
+
+  // 評分邏輯
+  const scores = [];
+
+  // 1. 趨勢方向：收盤 vs MA
+  const aboveMA = maVals.filter(v=>v!=null&&close>v).length;
+  const maScore = aboveMA === maVals.length ? 5 : aboveMA >= 2 ? 4 : aboveMA === 1 ? 3 : aboveMA === 0 ? 1 : 2;
+  const maTrend = maScore>=4?'多頭強勢':maScore===3?'多頭排列':maScore===2?'空頭排列':'空頭強勢';
+  scores.push({label:'趨勢方向', score:maScore, text:maTrend, color:maScore>=4?'var(--green)':maScore===3?'var(--amber)':'var(--red)'});
+
+  // 2. 均線結構：MA 多頭排列
+  let maOrdered = true;
+  for(let i=0;i<maVals.length-1;i++){
+    if(maVals[i]!=null&&maVals[i+1]!=null&&maVals[i]<maVals[i+1]){ maOrdered=false; break; }
+  }
+  scores.push({label:'均線結構', score:maOrdered?5:2,
+    text:maOrdered?'多頭排列':'空頭排列',
+    color:maOrdered?'var(--green)':'var(--red)'});
+
+  // 3. KD 指標
+  const kdBull = kVal>dVal && kVal<80;
+  const kdOB   = kVal>=80;
+  const kdOS   = kVal<=20;
+  const kdGC   = kPrev<dPrev && kVal>dVal; // 黃金交叉
+  const kdDC   = kPrev>dPrev && kVal<dVal; // 死亡交叉
+  let kdScore=3, kdText='高檔鈍化';
+  if(kdOS||kdGC){ kdScore=5; kdText=kdGC?'黃金交叉':'超賣區'; }
+  else if(kdBull){ kdScore=4; kdText='多頭'; }
+  else if(kdOB){ kdScore=2; kdText='高檔鈍化'; }
+  else if(kdDC){ kdScore=1; kdText='死亡交叉'; }
+  scores.push({label:'KD指標', score:kdScore, text:kdText,
+    color:kdScore>=4?'var(--green)':kdScore===2?'var(--amber)':'var(--red)'});
+
+  // 4. MACD
+  let macdScore=3, macdText='觀察中';
+  if(difVal!=null&&sigVal!=null&&histVal!=null){
+    const macdBull = difVal>0 && sigVal>0 && histVal>0;
+    const macdGC   = histPrev!=null && histPrev<0 && histVal>=0;
+    const macdDC   = histPrev!=null && histPrev>0 && histVal<=0;
+    const macdExp  = histVal!=null && histPrev!=null && Math.abs(histVal)>Math.abs(histPrev);
+    if(macdGC){ macdScore=5; macdText='金叉翻多'; }
+    else if(macdBull&&macdExp){ macdScore=5; macdText='多頭擴張'; }
+    else if(macdBull){ macdScore=4; macdText='多頭'; }
+    else if(macdDC){ macdScore=1; macdText='死叉翻空'; }
+    else if(difVal<0&&sigVal<0&&histVal<0){ macdScore=1; macdText='空頭'; }
+  }
+  scores.push({label:'MACD', score:macdScore, text:macdText,
+    color:macdScore>=4?'var(--green)':macdScore===3?'var(--amber)':'var(--red)'});
+
+  // 5. 量能狀況
+  const volMA5 = calcMA(vols, 5)[last];
+  const volRatio = volMA5 ? vol / volMA5 : 1;
+  const pUp = close >= open;
+  let volScore=3, volText='量縮';
+  if(volRatio>=1.5&&pUp){ volScore=5; volText='量增價漲'; }
+  else if(volRatio>=1.2&&pUp){ volScore=4; volText='溫和放量'; }
+  else if(volRatio<0.7&&pUp){ volScore=3; volText='量縮價穩'; }
+  else if(volRatio>=1.5&&!pUp){ volScore=1; volText='量增價跌'; }
+  else { volScore=2; volText='量縮'; }
+  scores.push({label:'量能狀況', score:volScore, text:volText,
+    color:volScore>=4?'var(--green)':volScore===3?'var(--amber)':'var(--red)'});
+
+  // 6. 型態結構（簡易：近期高低點判斷）
+  const recentCloses = closes.slice(-20);
+  const recentHigh = Math.max(...recentCloses);
+  const recentLow  = Math.min(...recentCloses);
+  const pos = (close - recentLow) / (recentHigh - recentLow || 1);
+  let shapeScore=3, shapeText='整理中';
+  if(pos>0.85){ shapeScore=2; shapeText='近高檔'; }
+  else if(pos>0.6){ shapeScore=4; shapeText='偏強'; }
+  else if(pos<0.15){ shapeScore=5; shapeText='近低檔反彈'; }
+  else if(pos<0.4){ shapeScore=3; shapeText='偏弱'; }
+  scores.push({label:'型態結構', score:shapeScore, text:shapeText,
+    color:shapeScore>=4?'var(--green)':shapeScore===3?'var(--amber)':'var(--red)'});
+
+  // 綜合評分
+  const total = scores.reduce((a,s)=>a+s.score,0);
+  const avg   = total / scores.length;
+  const stars = avg>=4.5?5:avg>=3.8?4:avg>=2.8?3:avg>=2?2:1;
+  const overallText = stars>=5?'強烈買進':stars>=4?'偏多操作':stars===3?'中性觀察':stars>=2?'偏空':' 強烈賣出';
+  const overallColor= stars>=4?'var(--green)':stars===3?'var(--amber)':'var(--red)';
+
+  // 建立評分 HTML
+  const scoreRows = scores.map(s=>{
+    const bar = Math.round(s.score/5*100);
+    return `<div style="display:flex;align-items:center;justify-content:space-between;
+                        padding:5px 0;border-bottom:1px solid var(--border);">
+      <span style="font-size:11px;color:var(--text2);width:70px;flex-shrink:0">${s.label}</span>
+      <div style="flex:1;margin:0 10px;background:var(--bg4);border-radius:3px;height:5px;">
+        <div style="width:${bar}%;height:5px;border-radius:3px;background:${s.color};transition:.3s"></div>
+      </div>
+      <span style="font-family:var(--mono);font-size:11px;font-weight:600;
+                   color:${s.color};width:80px;text-align:right;">${s.text}</span>
+    </div>`;
+  }).join('');
+
+  const starsHtml = Array.from({length:5},(_,i)=>
+    `<span style="color:${i<stars?'var(--amber)':'var(--text3)'}">★</span>`
+  ).join('');
+
+  const scoreDiv = document.createElement('div');
+  scoreDiv.style.cssText = 'background:var(--bg3);border-radius:6px;padding:12px 14px;margin-top:8px;border:1px solid var(--border);';
+  scoreDiv.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+      <span style="font-family:var(--mono);font-size:10px;color:var(--text3);
+                   letter-spacing:.5px;text-transform:uppercase;">技術分析評分</span>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span style="font-size:16px">${starsHtml}</span>
+        <span style="font-family:var(--mono);font-size:12px;font-weight:700;color:${overallColor}">${overallText}</span>
+      </div>
+    </div>
+    ${scoreRows}
+    <div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border);
+                font-family:var(--mono);font-size:10px;color:var(--text3);">
+      KD: K=${kVal?.toFixed(1)} D=${dVal?.toFixed(1)} &nbsp;|&nbsp;
+      DIF: ${difVal?.toFixed(3)} &nbsp;|&nbsp;
+      DEA: ${sigVal?.toFixed(3)} &nbsp;|&nbsp;
+      OSC: ${histVal?.toFixed(3)}
+    </div>`;
+
+  document.getElementById('kline-area').appendChild(scoreDiv);
+}
+</script>
+
+<script>
+// ══════════════════════════════════════════════
+// Step B：KD + MACD 副圖 + 技術分析評分
+// ══════════════════════════════════════════════
+
+// 覆蓋 renderKline，加入 KD + MACD 副圖
+const _renderKlineOrig = renderKline;
+
+function renderKline(data){
+  // 銷毀舊圖
+  Object.keys(dpCharts).forEach(k=>{
+    if(k.startsWith('kl-')){try{dpCharts[k].destroy();}catch(e){} delete dpCharts[k];}
+  });
+
+  const area = document.getElementById('kline-area');
+  area.style.display = '';
+  area.innerHTML = `
+    <div class="kline-wrap" style="height:260px;"><canvas id="kl-main"></canvas></div>
+    <div class="kline-wrap" style="height:100px;"><canvas id="kl-vol"></canvas></div>
+    <div class="kline-wrap" style="height:110px;"><canvas id="kl-kd"></canvas></div>
+    <div class="kline-wrap" style="height:110px;"><canvas id="kl-macd"></canvas></div>
+    <div id="kl-score-box" style="margin-top:8px;"></div>`;
+
+  const labels = data.map(d=>d.date.slice(5));
+  const closes = data.map(d=>d.close);
+  const opens  = data.map(d=>d.open);
+  const highs  = data.map(d=>d.high);
+  const lows   = data.map(d=>d.low);
+  const vols   = data.map(d=>d.vol);
+
+  // ── MA 計算 ────────────────────────────────
+  const maDatasets = PARAMS.ma.map((n,i)=>({
+    label:`MA${n}`,
+    data: calcMA(closes,n),
+    borderColor: MA_COLORS[i],
+    backgroundColor:'transparent',
+    borderWidth:1.5, pointRadius:0, tension:0.3,
+    spanGaps:true, type:'line', yAxisID:'y', order:1,
+  }));
+
+  const candleColors = data.map(d=>d.close>=d.open?'rgba(239,68,68,.85)':'rgba(34,197,94,.85)');
+
+  // ── 主圖 K線 ───────────────────────────────
+  dpCharts['kl-main'] = new Chart(document.getElementById('kl-main'),{
+    type:'bar',
+    data:{labels, datasets:[
+      {label:'High-Low', data:data.map(d=>d.high-d.low), base:lows,
+       backgroundColor:candleColors, borderWidth:0, barThickness:1,
+       categoryPercentage:0.3, order:3, yAxisID:'y'},
+      {label:'Open-Close', data:data.map(d=>Math.abs(d.close-d.open)||0.01),
+       base:data.map(d=>Math.min(d.open,d.close)),
+       backgroundColor:candleColors, borderWidth:0.5,
+       categoryPercentage:0.7, barPercentage:0.85, order:2, yAxisID:'y'},
+      ...maDatasets,
+    ]},
+    options:{
+      responsive:true, maintainAspectRatio:false, animation:{duration:0},
+      interaction:{mode:'index',intersect:false},
+      plugins:{
+        legend:{labels:{color:'#8b92a8',font:{size:10},
+          filter:item=>!['High-Low','Open-Close'].includes(item.text)}},
+        tooltip:{callbacks:{
+          title:items=>data[items[0].dataIndex]?.date||'',
+          label:item=>{
+            const d=data[item.dataIndex]; if(!d) return null;
+            if(item.datasetIndex===0) return[
+              `開:${d.open}  高:${d.high}`,
+              `低:${d.low}  收:${d.close}`,
+              `漲跌:${+(d.close-d.open).toFixed(2)} (${+((d.close-d.open)/d.open*100).toFixed(2)}%)`,
+            ];
+            if(item.datasetIndex===1) return null;
+            return `${item.dataset.label}: ${item.parsed.y!=null?item.parsed.y.toFixed(2):'—'}`;
+          },
+          filter:item=>item.datasetIndex!==1,
+        }}
+      },
+      scales:{
+        x:{ticks:{color:'#555e72',font:{size:9},maxRotation:0,autoSkip:true,maxTicksLimit:12},grid:{color:'#252a35'}},
+        y:{position:'right',ticks:{color:'#555e72',font:{size:9}},grid:{color:'#252a35'}},
+      }
+    }
+  });
+
+  // ── 成交量圖 ───────────────────────────────
+  const volMA  = calcMA(vols, PARAMS.vol_ma);
+  const volClr = data.map(d=>d.close>=d.open?'rgba(239,68,68,.6)':'rgba(34,197,94,.6)');
+  dpCharts['kl-vol'] = new Chart(document.getElementById('kl-vol'),{
+    type:'bar',
+    data:{labels, datasets:[
+      {label:'成交量(張)', data:vols, backgroundColor:volClr,
+       borderWidth:0, barPercentage:0.85, yAxisID:'y', order:2},
+      {type:'line', label:`量MA${PARAMS.vol_ma}`, data:volMA,
+       borderColor:'#f59e0b', backgroundColor:'transparent',
+       pointRadius:0, borderWidth:1.5, spanGaps:true, yAxisID:'y', order:1},
+    ]},
+    options:{
+      responsive:true, maintainAspectRatio:false, animation:{duration:0},
+      interaction:{mode:'index',intersect:false},
+      plugins:{
+        legend:{labels:{color:'#8b92a8',font:{size:10}}},
+        tooltip:{callbacks:{label:item=>
+          item.dataset.label+': '+(item.parsed.y!=null?Math.round(item.parsed.y).toLocaleString():'—')
+          +(item.datasetIndex===0?'張':'')
+        }}
+      },
+      scales:{
+        x:{ticks:{color:'#555e72',font:{size:9},maxRotation:0,autoSkip:true,maxTicksLimit:12},grid:{color:'#252a35'}},
+        y:{position:'right',ticks:{color:'#555e72',font:{size:9},callback:v=>v>=1000?Math.round(v/1000)+'k':v},grid:{color:'#252a35'}},
+      }
+    }
+  });
+
+  // ── KD 副圖 ────────────────────────────────
+  const {K, D} = calcKD(data, PARAMS.kd_n, PARAMS.kd_m1, PARAMS.kd_m2);
+  dpCharts['kl-kd'] = new Chart(document.getElementById('kl-kd'),{
+    type:'line',
+    data:{labels, datasets:[
+      {label:`K(${PARAMS.kd_n},${PARAMS.kd_m1},${PARAMS.kd_m2})`,
+       data:K, borderColor:'#f59e0b', backgroundColor:'transparent',
+       pointRadius:0, borderWidth:1.5, tension:0.3, spanGaps:true},
+      {label:'D', data:D, borderColor:'#60a5fa', backgroundColor:'transparent',
+       pointRadius:0, borderWidth:1.5, tension:0.3, spanGaps:true},
+    ]},
+    options:{
+      responsive:true, maintainAspectRatio:false, animation:{duration:0},
+      interaction:{mode:'index',intersect:false},
+      plugins:{
+        legend:{labels:{color:'#8b92a8',font:{size:10}}},
+        tooltip:{callbacks:{label:item=>
+          `${item.dataset.label}: ${item.parsed.y!=null?item.parsed.y.toFixed(2):'—'}`
+        }},
+        annotation:{annotations:{
+          ob:{type:'line',yMin:80,yMax:80,borderColor:'rgba(239,68,68,.4)',borderWidth:1,borderDash:[4,4]},
+          os:{type:'line',yMin:20,yMax:20,borderColor:'rgba(34,197,94,.4)',borderWidth:1,borderDash:[4,4]},
+        }}
+      },
+      scales:{
+        x:{ticks:{color:'#555e72',font:{size:9},maxRotation:0,autoSkip:true,maxTicksLimit:12},grid:{color:'#252a35'}},
+        y:{position:'right',min:0,max:100,
+           ticks:{color:'#555e72',font:{size:9},stepSize:20},
+           grid:{color:'#252a35'}},
+      }
+    }
+  });
+
+  // ── MACD 副圖 ──────────────────────────────
+  const {DIF, SIG, HIST: macdHist} = calcMACD(closes, PARAMS.macd_fast, PARAMS.macd_slow, PARAMS.macd_signal);
+  const histColors = macdHist.map(v=> v==null?'transparent': v>=0?'rgba(239,68,68,.7)':'rgba(34,197,94,.7)');
+  dpCharts['kl-macd'] = new Chart(document.getElementById('kl-macd'),{
+    type:'bar',
+    data:{labels, datasets:[
+      {type:'line', label:`DIF(${PARAMS.macd_fast},${PARAMS.macd_slow})`,
+       data:DIF, borderColor:'#f59e0b', backgroundColor:'transparent',
+       pointRadius:0, borderWidth:1.5, tension:0.3, spanGaps:true, order:1},
+      {type:'line', label:`DEA(${PARAMS.macd_signal})`,
+       data:SIG, borderColor:'#60a5fa', backgroundColor:'transparent',
+       pointRadius:0, borderWidth:1.5, tension:0.3, spanGaps:true, order:1},
+      {label:'MACD柱', data:macdHist,
+       backgroundColor:histColors, borderWidth:0,
+       barPercentage:0.8, order:2},
+    ]},
+    options:{
+      responsive:true, maintainAspectRatio:false, animation:{duration:0},
+      interaction:{mode:'index',intersect:false},
+      plugins:{
+        legend:{labels:{color:'#8b92a8',font:{size:10}}},
+        tooltip:{callbacks:{label:item=>
+          `${item.dataset.label}: ${item.parsed.y!=null?item.parsed.y.toFixed(4):'—'}`
+        }}
+      },
+      scales:{
+        x:{ticks:{color:'#555e72',font:{size:9},maxRotation:0,autoSkip:true,maxTicksLimit:12},grid:{color:'#252a35'}},
+        y:{position:'right',ticks:{color:'#555e72',font:{size:9}},grid:{color:'#252a35'}},
+      }
+    }
+  });
+
+  // ── 技術分析評分 ────────────────────────────
+  renderTechScore(data, closes, K, D, DIF, SIG, macdHist, vols);
+}
+
+// ── 技術分析評分 ──────────────────────────────
+function renderTechScore(data, closes, K, D, DIF, SIG, macdHist, vols){
+  const last = data[data.length-1];
+  if(!last) return;
+
+  const n = data.length;
+  const ma5  = calcMA(closes, 5);
+  const ma20 = calcMA(closes, 20);
+  const ma60 = calcMA(closes, 60);
+
+  // ── 各項評分（-2 ~ +2）────────────────────
+  let scores = {};
+
+  // 1. 趨勢方向（收盤 vs MA60）
+  const c = closes[n-1];
+  const m60 = ma60[n-1];
+  scores.trend = m60 ? (c > m60*1.03 ? 2 : c > m60 ? 1 : c > m60*0.97 ? -1 : -2) : 0;
+
+  // 2. 均線結構（MA5 > MA20 > MA60）
+  const m5=ma5[n-1], m20=ma20[n-1];
+  if(m5&&m20&&m60){
+    scores.ma = m5>m20&&m20>m60 ? 2 : m5>m20 ? 1 : m5<m20&&m20<m60 ? -2 : -1;
+  } else scores.ma = 0;
+
+  // 3. KD 指標
+  const kLast=K[n-1], dLast=D[n-1];
+  const kPrev=K[n-2]||kLast, dPrev=D[n-2]||dLast;
+  if(kLast!=null){
+    if(kLast>80) scores.kd = -1;                          // 超買
+    else if(kLast<20) scores.kd = 1;                      // 超賣
+    else if(kLast>dLast&&kPrev<=dPrev) scores.kd = 2;     // 黃金交叉
+    else if(kLast<dLast&&kPrev>=dPrev) scores.kd = -2;    // 死亡交叉
+    else scores.kd = kLast>50 ? 1 : -1;
+  } else scores.kd = 0;
+
+  // 4. MACD
+  const difL=DIF[n-1], sigL=SIG[n-1], hL=macdHist[n-1], hP=macdHist[n-2];
+  if(difL!=null&&sigL!=null){
+    if(difL>0&&sigL>0) scores.macd = hL>hP ? 2 : 1;
+    else if(difL<0&&sigL<0) scores.macd = hL<hP ? -2 : -1;
+    else scores.macd = difL>sigL ? 1 : -1;
+  } else scores.macd = 0;
+
+  // 5. 量能（今日量 vs 5日均量）
+  const volMA5 = calcMA(vols, 5);
+  const vL=vols[n-1], vMA=volMA5[n-1];
+  if(vMA){
+    const ratio = vL/vMA;
+    scores.vol = ratio>1.5&&c>last.open ? 2
+               : ratio>1.2 ? 1
+               : ratio<0.5 ? -1
+               : 0;
+  } else scores.vol = 0;
+
+  // 6. 型態（簡易：近5日高低點）
+  const recent5 = data.slice(-5);
+  const hiIdx = recent5.reduce((a,d,i)=>d.high>recent5[a].high?i:a,0);
+  const liIdx = recent5.reduce((a,d,i)=>d.low<recent5[a].low?i:a,0);
+  scores.pattern = hiIdx > liIdx ? 1 : hiIdx < liIdx ? -1 : 0;
+
+  // ── 轉換為文字 & 星級 ──────────────────────
+  const total = Object.values(scores).reduce((a,b)=>a+b,0);
+  const maxScore = Object.keys(scores).length * 2;
+  const starRaw  = (total + maxScore) / (maxScore*2) * 5;
+  const stars    = Math.round(starRaw * 2) / 2; // 0.5步進
+
+  function starHTML(s){
+    let html='';
+    for(let i=1;i<=5;i++){
+      if(s>=i) html+=`<span style="color:#f59e0b">★</span>`;
+      else if(s>=i-0.5) html+=`<span style="color:#f59e0b">☆</span>`;
+      else html+=`<span style="color:#374052">☆</span>`;
+    }
+    return html;
+  }
+
+  function scoreLabel(v){
+    const lbl=['極弱','偏空','中性','偏多','強多'];
+    const idx = Math.round((v+2)/4*4);
+    return {text:lbl[Math.min(4,Math.max(0,idx))],
+            color:v>=1?'var(--green)':v<=-1?'var(--red)':'var(--amber)'};
+  }
+
+  const items = [
+    {key:'trend',   name:'趨勢方向'},
+    {key:'ma',      name:'均線結構'},
+    {key:'kd',      name:'KD指標'},
+    {key:'macd',    name:'MACD'},
+    {key:'vol',     name:'量能狀況'},
+    {key:'pattern', name:'型態結構'},
+  ];
+
+  const rows = items.map(it=>{
+    const v  = scores[it.key];
+    const lb = scoreLabel(v);
+    return `<tr>
+      <td style="color:var(--text2);padding:5px 8px;font-size:11px;">${it.name}</td>
+      <td style="font-weight:600;color:${lb.color};padding:5px 8px;font-size:11px;">${lb.text}</td>
+      <td style="padding:5px 8px;">${starHTML(Math.round((v+2)/4*5*2)/2)}</td>
+    </tr>`;
+  }).join('');
+
+  const overallLbl = scoreLabel(total/maxScore*2);
+
+  document.getElementById('kl-score-box').innerHTML = `
+    <style>
+      .score-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+      .score-card{background:var(--bg3);border-radius:6px;padding:10px 12px;border:1px solid var(--border);}
+      .score-title{font-family:var(--mono);font-size:10px;color:var(--text3);letter-spacing:.5px;
+                   text-transform:uppercase;margin-bottom:8px;padding-bottom:4px;
+                   border-bottom:1px solid var(--border);}
+      .score-tbl{width:100%;border-collapse:collapse;}
+      .score-tbl tr:hover td{background:var(--bg4);}
+    </style>
+    <div class="score-grid">
+      <div class="score-card">
+        <div class="score-title">技術分析評分</div>
+        <table class="score-tbl">${rows}</table>
+      </div>
+      <div class="score-card">
+        <div class="score-title">綜合評分</div>
+        <div style="text-align:center;padding:16px 0;">
+          <div style="font-size:28px;margin-bottom:6px;">${starHTML(stars)}</div>
+          <div style="font-family:var(--mono);font-size:22px;font-weight:700;
+                      color:${overallLbl.color}">${overallLbl.text}</div>
+          <div style="font-family:var(--mono);font-size:11px;color:var(--text3);margin-top:6px;">
+            ${total>0?'+':''}${total} / ${maxScore} 分
+          </div>
+        </div>
+        <div style="font-family:var(--mono);font-size:10px;color:var(--text3);margin-top:8px;
+                    padding-top:8px;border-top:1px solid var(--border);line-height:1.8;">
+          收盤 <b style="color:var(--text)">${last.close}</b> ／
+          MA5 <b style="color:${MA_COLORS[0]}">${ma5[n-1]?.toFixed(2)||'—'}</b> ／
+          MA20 <b style="color:${MA_COLORS[1]}">${ma20[n-1]?.toFixed(2)||'—'}</b><br>
+          K <b style="color:#f59e0b">${K[n-1]?.toFixed(2)||'—'}</b> ／
+          D <b style="color:#60a5fa">${D[n-1]?.toFixed(2)||'—'}</b> ／
+          DIF <b style="color:var(--text)">${DIF[n-1]?.toFixed(4)||'—'}</b>
+        </div>
+      </div>
+    </div>`;
 }
 </script>

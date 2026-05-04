@@ -1484,8 +1484,8 @@ async function fetchTWSEHistory(code){
   const now   = new Date();
   const allData = [];
 
-  // 抓近3個月資料
-  for(let i = 2; i >= 0; i--){
+  // 抓近6個月資料（確保超過100個交易日）
+  for(let i = 5; i >= 0; i--){
     const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
     const dateStr = d.getFullYear().toString()
       + String(d.getMonth()+1).padStart(2,'0') + '01';

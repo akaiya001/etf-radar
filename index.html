@@ -2455,3 +2455,724 @@ function renderTechScore(data, closes, K, D, DIF, SIG, macdHist, vols){
     </div>`;
 }
 </script>
+
+<script>
+// ══════════════════════════════════════════════
+// Step C：籌碼分析
+// 內容：法人連續買賣天數 + 內外盤比 + 籌碼集中度
+// ══════════════════════════════════════════════
+
+// ── 抓取法人近N日明細 ────────────────────────
+async function fetchInstHistory(code, days=10){
+  const results = [];
+  const now = new Date();
+  let found = 0;
+
+  for(let i=0; i<30 && found<days; i++){
+    const d = new Date(now);
+    d.setDate(now.getDate() - i);
+    if(d.getDay()===0||d.getDay()===6) continue;
+    const dateStr = d.toISOString().slice(0,10).replace(/-/g,'');
+
+    const urls=[
+      `https://www.twse.com.tw/rwd/zh/fund/T86?date=${dateStr}&selectType=ALLBUT0999&response=json`,
+      `https://www.twse.com.tw/fund/T86?date=${dateStr}&selectType=ALLBUT0999&response=json`,
+    ];
+    for(const url of urls){
+      try{
+        const r = await fetch(url,{signal:AbortSignal.timeout(8000)});
+        const data = await r.json();
+        if((data.stat==='OK'||data.status==='ok') && data.data?.length){
+          const row = data.data.find(r=>(r[0]||'').trim()===code||(r[1]||'').trim()===code);
+          if(row){
+            const p = s => parseInt((s||'0').replace(/,/g,''))||0;
+            results.push({
+              date: dateStr,
+              foreignNet: p(row[7]),
+              trustNet:   p(row[10]),
+              selfNet:    p(row[13]),
+              totalNet:   p(row[7])+p(row[10])+p(row[13]),
+            });
+            found++;
+          }
+          break;
+        }
+      } catch(e){}
+    }
+  }
+  return results.reverse(); // 由舊到新
+}
+
+// ── 抓取即時內外盤（TWSE mis API）────────────
+async function fetchBidAsk(code){
+  const url=`https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_${code}.tw&json=1&delay=0`;
+  try{
+    const r = await fetch(url,{
+      headers:{'Referer':'https://mis.twse.com.tw/'},
+      signal:AbortSignal.timeout(8000)
+    });
+    const data = await r.json();
+    const item = data.msgArray?.[0];
+    if(!item) return null;
+    const tv = parseFloat(item.tv||0); // 內盤成交量
+    const v  = parseFloat(item.v ||0); // 總成交量
+    return {
+      inner: tv,
+      outer: v - tv,
+      total: v,
+      innerPct: v>0 ? +(tv/v*100).toFixed(1) : 50,
+      outerPct: v>0 ? +((v-tv)/v*100).toFixed(1) : 50,
+    };
+  } catch(e){ return null; }
+}
+
+// ── 籌碼集中度（用法人佔比估算）─────────────
+function calcChipConcentration(instHistory){
+  if(!instHistory.length) return null;
+  const recent5 = instHistory.slice(-5);
+  const buyDays  = recent5.filter(d=>d.totalNet>0).length;
+  const totalNet = recent5.reduce((a,d)=>a+d.totalNet,0);
+  // 簡易評分：連買天數 + 合計買超量
+  const score = buyDays/5*60 + Math.min(40, totalNet/1000);
+  return Math.max(0, Math.min(100, Math.round(score)));
+}
+
+// ── 法人連續買賣天數 ──────────────────────────
+function calcConsecutiveDays(instHistory){
+  const result = {foreign:0, trust:0, self:0, total:0};
+  if(!instHistory.length) return result;
+
+  const calc = (arr) => {
+    const last = arr[arr.length-1];
+    const dir  = last > 0 ? 1 : -1;
+    let days = 0;
+    for(let i=arr.length-1; i>=0; i--){
+      if((arr[i]>0&&dir===1)||(arr[i]<0&&dir===-1)) days++;
+      else break;
+    }
+    return dir * days;
+  };
+
+  result.foreign = calc(instHistory.map(d=>d.foreignNet));
+  result.trust   = calc(instHistory.map(d=>d.trustNet));
+  result.self    = calc(instHistory.map(d=>d.selfNet));
+  result.total   = calc(instHistory.map(d=>d.totalNet));
+  return result;
+}
+
+// ── 渲染籌碼分析主畫面 ───────────────────────
+async function renderChipAnalysis(code){
+  const body = document.getElementById('dp-body');
+  body.innerHTML = `
+    <style>
+      .chip-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;}
+      .chip-card{background:var(--bg3);border-radius:6px;padding:10px 12px;border:1px solid var(--border);}
+      .chip-title{font-family:var(--mono);font-size:10px;color:var(--text3);letter-spacing:.5px;
+                  text-transform:uppercase;margin-bottom:8px;padding-bottom:4px;
+                  border-bottom:1px solid var(--border);}
+      .inst-row{display:flex;align-items:center;justify-content:space-between;
+                padding:5px 0;border-bottom:1px solid var(--border);}
+      .inst-row:last-child{border-bottom:none;}
+      .inst-name{font-size:11px;color:var(--text2);}
+      .inst-val{font-family:var(--mono);font-size:12px;font-weight:700;}
+      .inst-days{font-family:var(--mono);font-size:10px;padding:2px 7px;border-radius:3px;}
+      .days-buy{background:var(--gbg);color:var(--green);border:1px solid var(--gdim);}
+      .days-sell{background:var(--rbg);color:var(--red);border:1px solid var(--rdim);}
+      .days-flat{background:var(--bg4);color:var(--text3);border:1px solid var(--border);}
+      .gauge-wrap{position:relative;height:12px;background:var(--bg4);border-radius:6px;overflow:hidden;margin:6px 0;}
+      .gauge-inner{height:100%;border-radius:6px;transition:width .5s;}
+      .bar-chart-row{display:flex;align-items:center;gap:6px;margin-bottom:4px;}
+      .bar-label{font-size:10px;color:var(--text2);width:60px;flex-shrink:0;font-family:var(--mono);}
+      .bar-track{flex:1;height:8px;background:var(--bg4);border-radius:4px;overflow:hidden;}
+      .bar-fill{height:100%;border-radius:4px;transition:width .4s;}
+      .chip-notice{font-family:var(--mono);font-size:10px;color:var(--text3);margin-top:8px;text-align:center;}
+    </style>
+    <div id="chip-loading" class="loading-screen"><span>載入籌碼資料...</span></div>
+    <div id="chip-content" style="display:none;"></div>`;
+
+  // 並行抓取
+  const [instHistory, bidAsk] = await Promise.all([
+    fetchInstHistory(code, 10),
+    fetchBidAsk(code),
+  ]);
+
+  document.getElementById('chip-loading').style.display='none';
+  const el = document.getElementById('chip-content');
+  el.style.display='';
+
+  if(!instHistory.length){
+    el.innerHTML=`<div class="notice">⚠ 法人籌碼資料暫無（盤後18:30後更新）</div>`;
+    return;
+  }
+
+  const consec = calcConsecutiveDays(instHistory);
+  const chipScore = calcChipConcentration(instHistory);
+  const last = instHistory[instHistory.length-1];
+
+  // 連續買賣天數標籤
+  function daysTag(d){
+    if(d===0) return `<span class="inst-days days-flat">持平</span>`;
+    const cls = d>0?'days-buy':'days-sell';
+    const lbl = d>0?`連買${d}天`:`連賣${Math.abs(d)}天`;
+    return `<span class="inst-days ${cls}">${lbl}</span>`;
+  }
+
+  // 內外盤 HTML
+  const bidAskHTML = bidAsk ? `
+    <div style="margin-bottom:6px;">
+      <div style="display:flex;justify-content:space-between;font-family:var(--mono);font-size:11px;margin-bottom:4px;">
+        <span style="color:var(--red)">內盤（賣壓） ${bidAsk.innerPct}%</span>
+        <span style="color:var(--green)">外盤（買力） ${bidAsk.outerPct}%</span>
+      </div>
+      <div class="gauge-wrap">
+        <div class="gauge-inner" style="width:${bidAsk.innerPct}%;background:linear-gradient(90deg,var(--red),var(--amber));"></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-family:var(--mono);font-size:10px;color:var(--text3);">
+        <span>${bidAsk.inner.toLocaleString()}張</span>
+        <span>總量 ${bidAsk.total.toLocaleString()}張</span>
+        <span>${bidAsk.outer.toLocaleString()}張</span>
+      </div>
+    </div>` : `<div class="notice">內外盤資料需盤中取得</div>`;
+
+  // 法人10日柱狀圖
+  const maxAbs = Math.max(...instHistory.map(d=>Math.max(Math.abs(d.foreignNet),Math.abs(d.trustNet),Math.abs(d.selfNet))),1);
+  const histRows = ['外資','投信','自營商'].map((name,idx)=>{
+    const key = ['foreignNet','trustNet','selfNet'][idx];
+    const bars = instHistory.slice(-5).map(d=>{
+      const v = d[key];
+      const pct = Math.round(Math.abs(v)/maxAbs*100);
+      const clr = v>=0?'var(--green)':'var(--red)';
+      return `<div class="bar-chart-row">
+        <div class="bar-label">${d.date.slice(4,6)}/${d.date.slice(6,8)}</div>
+        <div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${clr};"></div></div>
+        <div style="font-family:var(--mono);font-size:10px;color:${v>=0?'var(--green)':'var(--red)'};width:65px;text-align:right;">${v>=0?'+':''}${v.toLocaleString()}</div>
+      </div>`;
+    }).join('');
+    return `<div style="margin-bottom:10px;">
+      <div style="font-family:var(--mono);font-size:10px;color:var(--text2);margin-bottom:4px;">${name} ${daysTag(consec[['foreign','trust','self'][idx]])}</div>
+      ${bars}
+    </div>`;
+  }).join('');
+
+  // 籌碼集中度圓弧（CSS）
+  const scoreColor = chipScore>=70?'var(--green)':chipScore>=40?'var(--amber)':'var(--red)';
+  const scoreLabel = chipScore>=70?'偏多集中':chipScore>=55?'略偏多':chipScore>=45?'中性':chipScore>=30?'略偏空':'偏空分散';
+
+  el.innerHTML = `
+    <div class="chip-grid">
+      <!-- 法人買賣超今日 -->
+      <div class="chip-card">
+        <div class="chip-title">今日法人買賣超（張）</div>
+        <div class="inst-row">
+          <span class="inst-name">外資及陸資</span>
+          <div style="display:flex;align-items:center;gap:6px;">
+            <span class="inst-val ${last.foreignNet>=0?'up':'down'}">${last.foreignNet>=0?'+':''}${last.foreignNet.toLocaleString()}</span>
+            ${daysTag(consec.foreign)}
+          </div>
+        </div>
+        <div class="inst-row">
+          <span class="inst-name">投信</span>
+          <div style="display:flex;align-items:center;gap:6px;">
+            <span class="inst-val ${last.trustNet>=0?'up':'down'}">${last.trustNet>=0?'+':''}${last.trustNet.toLocaleString()}</span>
+            ${daysTag(consec.trust)}
+          </div>
+        </div>
+        <div class="inst-row">
+          <span class="inst-name">自營商</span>
+          <div style="display:flex;align-items:center;gap:6px;">
+            <span class="inst-val ${last.selfNet>=0?'up':'down'}">${last.selfNet>=0?'+':''}${last.selfNet.toLocaleString()}</span>
+            ${daysTag(consec.self)}
+          </div>
+        </div>
+        <div class="inst-row" style="margin-top:4px;padding-top:4px;border-top:1px solid var(--border3);">
+          <span class="inst-name" style="font-weight:600;color:var(--text);">合計三大法人</span>
+          <div style="display:flex;align-items:center;gap:6px;">
+            <span class="inst-val ${last.totalNet>=0?'up':'down'}" style="font-size:14px;">${last.totalNet>=0?'+':''}${last.totalNet.toLocaleString()}</span>
+            ${daysTag(consec.total)}
+          </div>
+        </div>
+      </div>
+
+      <!-- 籌碼集中度 + 內外盤 -->
+      <div class="chip-card">
+        <div class="chip-title">籌碼集中度</div>
+        <div style="text-align:center;padding:10px 0 14px;">
+          <div style="font-size:36px;font-weight:700;font-family:var(--mono);color:${scoreColor};">${chipScore}</div>
+          <div style="font-size:12px;color:${scoreColor};font-weight:600;margin-top:4px;">${scoreLabel}</div>
+          <div class="gauge-wrap" style="margin:8px 4px 4px;">
+            <div class="gauge-inner" style="width:${chipScore}%;background:${scoreColor};"></div>
+          </div>
+          <div style="font-family:var(--mono);font-size:9px;color:var(--text3);">基於近5日法人合計買賣超估算</div>
+        </div>
+        <div class="chip-title" style="margin-top:4px;">內外盤比（即時）</div>
+        ${bidAskHTML}
+      </div>
+    </div>
+
+    <!-- 近5日各法人柱狀圖 -->
+    <div class="chip-card">
+      <div class="chip-title">近5日法人買賣超明細（張）</div>
+      ${histRows}
+    </div>
+
+    <!-- 法人10日趨勢圖 -->
+    <div class="chip-card" style="margin-top:10px;">
+      <div class="chip-title">法人合計近10日趨勢</div>
+      <div style="position:relative;height:120px;"><canvas id="chip-trend-chart"></canvas></div>
+    </div>`;
+
+  // 法人趨勢折線圖
+  setTimeout(()=>{
+    const ctx = document.getElementById('chip-trend-chart');
+    if(!ctx) return;
+    const existing = Chart.getChart(ctx);
+    if(existing) existing.destroy();
+    const labels = instHistory.map(d=>d.date.slice(4,6)+'/'+d.date.slice(6,8));
+    new Chart(ctx,{
+      type:'bar',
+      data:{
+        labels,
+        datasets:[
+          {type:'line', label:'外資', data:instHistory.map(d=>d.foreignNet),
+           borderColor:'#60a5fa', backgroundColor:'transparent',
+           pointRadius:3, borderWidth:1.5, tension:0.3, spanGaps:true},
+          {type:'line', label:'投信', data:instHistory.map(d=>d.trustNet),
+           borderColor:'#f59e0b', backgroundColor:'transparent',
+           pointRadius:3, borderWidth:1.5, tension:0.3, spanGaps:true},
+          {label:'合計', data:instHistory.map(d=>d.totalNet),
+           backgroundColor:instHistory.map(d=>d.totalNet>=0?'rgba(34,197,94,.5)':'rgba(239,68,68,.5)'),
+           borderWidth:0, barPercentage:0.7},
+        ]
+      },
+      options:{
+        responsive:true, maintainAspectRatio:false, animation:{duration:0},
+        interaction:{mode:'index',intersect:false},
+        plugins:{legend:{labels:{color:'#8b92a8',font:{size:10}}},
+          tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${c.parsed.y>=0?'+':''}${c.parsed.y.toLocaleString()}張`}}
+        },
+        scales:{
+          x:{ticks:{color:'#555e72',font:{size:9}},grid:{color:'#252a35'}},
+          y:{position:'right',ticks:{color:'#555e72',font:{size:9},callback:v=>v>=1000||v<=-1000?Math.round(v/1000)+'k':v},grid:{color:'#252a35'}},
+        }
+      }
+    });
+  },50);
+}
+
+// ── 把籌碼分析掛入個股詳情面板 ───────────────
+// 覆蓋 loadDPTab 加入 chip 分頁
+const _loadDPTabOrig = loadDPTab;
+function loadDPTab(name){
+  if(name==='chip'){
+    const s = STOCKS[activeCode]||{};
+    const body = document.getElementById('dp-body');
+    body.innerHTML='';
+    renderChipAnalysis(s.code);
+  } else {
+    _loadDPTabOrig(name);
+  }
+}
+
+// 把籌碼分頁加入 dp-tabs
+const _openDPOrig = openDP;
+function openDP(code){
+  _openDPOrig(code);
+  // 把 dpTab 改為 kline（已在上方設定）並插入籌碼按鈕
+  const tabsEl = document.getElementById('dp-tabs');
+  if(tabsEl && !tabsEl.querySelector('[data-tab="chip"]')){
+    const chipBtn = document.createElement('div');
+    chipBtn.className = 'nav-tab';
+    chipBtn.setAttribute('data-tab','chip');
+    chipBtn.style.cssText='font-size:11px;padding:7px 14px;';
+    chipBtn.textContent='🧩 籌碼分析';
+    chipBtn.onclick = function(){ setDPTab('chip',this); };
+    tabsEl.appendChild(chipBtn);
+  }
+}
+</script>
+
+<script>
+// ══════════════════════════════════════════════
+// Step C：籌碼分析
+// 法人連續買賣天數 + 內外盤比 + 籌碼集中度
+// ══════════════════════════════════════════════
+
+// ── 在 renderInst 後面補上籌碼分析 ──────────
+const _fetchInstOrig = fetchInst;
+
+async function fetchInst(code){
+  const el = document.getElementById('inst-result');
+  if(!el) return;
+  try{
+    let data=null, usedDate='';
+    const d=new Date();
+    const triedDates=[];
+    for(let i=0;i<14;i++){
+      const dd=new Date(d);
+      dd.setDate(d.getDate()-i);
+      if(dd.getDay()===0||dd.getDay()===6) continue;
+      const dateStr=dd.toISOString().slice(0,10).replace(/-/g,'');
+      triedDates.push(dateStr);
+      if(triedDates.length>=8) break;
+    }
+    for(const dateStr of triedDates){
+      const urls=[
+        `https://www.twse.com.tw/rwd/zh/fund/T86?date=${dateStr}&selectType=ALLBUT0999&response=json`,
+        `https://www.twse.com.tw/fund/T86?date=${dateStr}&selectType=ALLBUT0999&response=json`,
+      ];
+      for(const url of urls){
+        try{
+          const r=await fetch(url,{signal:AbortSignal.timeout(8000)});
+          const d2=await r.json();
+          if((d2.stat==='OK'||d2.status==='ok')&&d2.data&&d2.data.length>0){
+            data=d2; usedDate=dateStr; break;
+          }
+        }catch(e2){}
+      }
+      if(data) break;
+    }
+
+    if(!data){
+      el.previousElementSibling.style.display='none';
+      el.innerHTML=`<div class="notice">三大法人資料暫無（盤後18:30更新）<br>
+        <a href="https://www.twse.com.tw/zh/trading/fund/T86.html"
+           target="_blank" style="color:var(--blue)">前往TWSE查詢 →</a></div>`;
+      renderChipSection(code, el, null, usedDate);
+      return;
+    }
+
+    const rows=(data.data||[]).filter(r=>(r[0]||'').trim()===code||(r[1]||'').trim()===code);
+    if(!rows.length){
+      el.previousElementSibling.style.display='none';
+      el.innerHTML=`<div class="notice">查無 ${code} 法人資料（${usedDate}）</div>`;
+      renderChipSection(code, el, null, usedDate);
+      return;
+    }
+
+    const row=rows[0];
+    const parse=s=>parseInt((s||'0').replace(/,/g,''))||0;
+    const inst=[
+      {n:'外資及陸資', buy:parse(row[5]), sell:parse(row[6]), net:parse(row[7])},
+      {n:'投信',       buy:parse(row[8]), sell:parse(row[9]), net:parse(row[10])},
+      {n:'自營商',     buy:parse(row[11]),sell:parse(row[12]),net:parse(row[13])},
+    ];
+    const maxV=Math.max(...inst.map(i=>Math.max(i.buy,i.sell)),1);
+    const total=inst.reduce((a,i)=>({buy:a.buy+i.buy,sell:a.sell+i.sell,net:a.net+i.net}),{buy:0,sell:0,net:0});
+
+    const tRows=inst.map(i=>{
+      const nd=drc(i.net);
+      const bw=Math.round(i.buy/maxV*80);
+      const sw=Math.round(i.sell/maxV*80);
+      return `<tr>
+        <td style="color:var(--text2);white-space:nowrap;padding:5px 8px">${i.n}</td>
+        <td style="padding:5px 8px"><div style="display:flex;align-items:center;gap:5px;">
+          <div style="width:${bw}px;height:4px;border-radius:2px;background:var(--green);flex-shrink:0;"></div>
+          <span class="up" style="font-family:var(--mono)">${i.buy.toLocaleString()}</span>
+        </div></td>
+        <td style="padding:5px 8px"><div style="display:flex;align-items:center;gap:5px;">
+          <div style="width:${sw}px;height:4px;border-radius:2px;background:var(--red);flex-shrink:0;"></div>
+          <span class="down" style="font-family:var(--mono)">${i.sell.toLocaleString()}</span>
+        </div></td>
+        <td class="${nd}" style="font-family:var(--mono);font-weight:700;padding:5px 8px">
+          ${i.net>0?'+':''}${i.net.toLocaleString()}</td>
+      </tr>`;
+    }).join('');
+
+    const canvasId='inst-chart-'+code;
+    el.previousElementSibling.style.display='none';
+    el.innerHTML=`
+      <div class="sub2" style="font-family:var(--mono);font-size:10px;color:var(--text3);
+           letter-spacing:.5px;text-transform:uppercase;margin:0 0 6px;
+           padding-bottom:4px;border-bottom:1px solid var(--border);">
+        今日三大法人買賣超（張）｜${usedDate}
+      </div>
+      <div style="overflow-x:auto;border-radius:5px;border:1px solid var(--border);margin-bottom:12px;">
+        <table style="width:100%;border-collapse:collapse;font-size:11px;">
+          <thead><tr style="background:var(--bg3)">
+            <th style="padding:5px 8px;font-family:var(--mono);font-size:9px;color:var(--text3);border-bottom:1px solid var(--border)">法人</th>
+            <th style="padding:5px 8px;font-family:var(--mono);font-size:9px;color:var(--text3);border-bottom:1px solid var(--border)">買進</th>
+            <th style="padding:5px 8px;font-family:var(--mono);font-size:9px;color:var(--text3);border-bottom:1px solid var(--border)">賣出</th>
+            <th style="padding:5px 8px;font-family:var(--mono);font-size:9px;color:var(--text3);border-bottom:1px solid var(--border)">買賣超</th>
+          </tr></thead>
+          <tbody>${tRows}</tbody>
+          <tfoot><tr style="background:var(--bg3)">
+            <td style="padding:5px 8px;font-weight:600">合計</td>
+            <td class="up" style="padding:5px 8px;font-family:var(--mono)">${total.buy.toLocaleString()}</td>
+            <td class="down" style="padding:5px 8px;font-family:var(--mono)">${total.sell.toLocaleString()}</td>
+            <td class="${drc(total.net)}" style="padding:5px 8px;font-family:var(--mono);font-weight:700">
+              ${total.net>0?'+':''}${total.net.toLocaleString()}</td>
+          </tr></tfoot>
+        </table>
+      </div>
+      <div style="background:var(--bg3);border-radius:6px;padding:10px;margin-bottom:12px;position:relative;">
+        <canvas id="${canvasId}" height="140"></canvas>
+      </div>`;
+
+    // 法人買賣超柱狀圖
+    setTimeout(()=>{
+      const ctx=document.getElementById(canvasId);
+      if(!ctx) return;
+      dpCharts[canvasId]=new Chart(ctx,{
+        type:'bar',
+        data:{
+          labels:inst.map(i=>i.n),
+          datasets:[
+            {label:'買進',data:inst.map(i=>i.buy),backgroundColor:'rgba(34,197,94,.6)',borderRadius:3},
+            {label:'賣出',data:inst.map(i=>-i.sell),backgroundColor:'rgba(239,68,68,.6)',borderRadius:3},
+          ]
+        },
+        options:{
+          responsive:true,maintainAspectRatio:false,
+          plugins:{
+            legend:{labels:{color:'#8b92a8',font:{size:10}}},
+            tooltip:{callbacks:{label:c=>(c.dataset.label)+': '+Math.abs(c.parsed.y).toLocaleString()+'張'}}
+          },
+          scales:{
+            x:{ticks:{color:'#555e72',font:{size:10}},grid:{color:'#252a35'}},
+            y:{ticks:{color:'#555e72',font:{size:10},callback:v=>Math.abs(v).toLocaleString()},grid:{color:'#252a35'}},
+          }
+        }
+      });
+    },50);
+
+    // 渲染籌碼分析區塊
+    renderChipSection(code, el, {inst, total, usedDate}, usedDate);
+
+  }catch(e){
+    if(el) el.innerHTML=`<div class="notice">法人資料載入失敗：${e.message}</div>`;
+    renderChipSection(code, el, null, '');
+  }
+}
+
+// ── 籌碼分析區塊 ─────────────────────────────
+async function renderChipSection(code, parentEl, instData, usedDate){
+  // 建立籌碼容器
+  const chipDiv = document.createElement('div');
+  chipDiv.id = 'chip-section';
+  parentEl.parentNode.appendChild(chipDiv);
+
+  chipDiv.innerHTML = `
+    <div class="sub2" style="font-family:var(--mono);font-size:10px;color:var(--text3);
+         letter-spacing:.5px;text-transform:uppercase;margin:10px 0 6px;
+         padding-bottom:4px;border-bottom:1px solid var(--border);">
+      籌碼分析
+    </div>
+    <div id="chip-loading" class="loading-screen" style="padding:20px;">
+      <span>載入籌碼資料...</span>
+    </div>
+    <div id="chip-content"></div>`;
+
+  // 抓近20日三大法人連續買賣資料
+  try{
+    const instHistory = await fetchInstHistory(code);
+    renderChipContent(code, instData, instHistory);
+  }catch(e){
+    document.getElementById('chip-loading').style.display='none';
+    document.getElementById('chip-content').innerHTML=
+      `<div class="notice">籌碼資料載入失敗：${e.message}</div>`;
+  }
+}
+
+// ── 抓近20日法人資料 ─────────────────────────
+async function fetchInstHistory(code){
+  const results=[];
+  const now=new Date();
+  const months=new Set();
+
+  // 抓近2個月資料
+  for(let i=0;i<2;i++){
+    const d=new Date(now.getFullYear(), now.getMonth()-i, 1);
+    const dateStr=d.getFullYear().toString()+String(d.getMonth()+1).padStart(2,'0')+'01';
+    const url=`https://www.twse.com.tw/fund/TWT38U?response=json&date=${dateStr}&stockNo=${code}`;
+    try{
+      const r=await fetch(url,{signal:AbortSignal.timeout(10000)});
+      const json=await r.json();
+      if(json.stat==='OK'&&json.data){
+        for(const row of json.data){
+          const dateRaw=row[0];
+          const parts=dateRaw.split('/');
+          const year=parseInt(parts[0])+1911;
+          const dateISO=`${year}-${parts[1]}-${parts[2]}`;
+          const parse=s=>parseInt((s||'0').replace(/,/g,'').replace('+',''))||0;
+          const parseN=s=>{
+            const v=(s||'').replace(/,/g,'');
+            return v.startsWith('-')?-parseInt(v.slice(1))||0:parseInt(v)||0;
+          };
+          results.push({
+            date:dateISO,
+            foreign:  parseN(row[1]),
+            trust:    parseN(row[2]),
+            dealer:   parseN(row[3]),
+            total:    parseN(row[1])+parseN(row[2])+parseN(row[3]),
+          });
+        }
+      }
+    }catch(e){}
+  }
+  return results.sort((a,b)=>b.date.localeCompare(a.date)).slice(0,20);
+}
+
+// ── 渲染籌碼內容 ─────────────────────────────
+function renderChipContent(code, todayInst, history){
+  const loadEl=document.getElementById('chip-loading');
+  const contEl=document.getElementById('chip-content');
+  if(loadEl) loadEl.style.display='none';
+  if(!contEl) return;
+
+  // 計算連續買賣天數
+  function calcConsecutive(arr, key){
+    if(!arr.length) return {buy:0, sell:0};
+    let buy=0, sell=0;
+    const last=arr[0][key];
+    if(last>0){
+      for(const r of arr){ if(r[key]>0) buy++; else break; }
+    } else if(last<0){
+      for(const r of arr){ if(r[key]<0) sell++; else break; }
+    }
+    return {buy, sell};
+  }
+
+  const fConsec  = calcConsecutive(history,'foreign');
+  const tConsec  = calcConsecutive(history,'trust');
+  const dConsec  = calcConsecutive(history,'dealer');
+  const ttConsec = calcConsecutive(history,'total');
+
+  // 近20日累積
+  const sum20={foreign:0,trust:0,dealer:0,total:0};
+  history.forEach(r=>{sum20.foreign+=r.foreign;sum20.trust+=r.trust;sum20.dealer+=r.dealer;sum20.total+=r.total;});
+
+  // 籌碼集中度（三大法人近20日合計 / 平均成交量估算）
+  const absTotal=Math.abs(sum20.total);
+
+  function consecHTML(c, name){
+    if(c.buy>0){
+      return `<span style="color:var(--green);font-family:var(--mono);font-weight:700">
+        連續買超 ${c.buy} 天</span>`;
+    } else if(c.sell>0){
+      return `<span style="color:var(--red);font-family:var(--mono);font-weight:700">
+        連續賣超 ${c.sell} 天</span>`;
+    }
+    return `<span style="color:var(--text3);font-family:var(--mono)">無方向</span>`;
+  }
+
+  function netHTML(v){
+    const dr=v>0?'up':v<0?'down':'flat';
+    return `<span class="${dr}" style="font-family:var(--mono);font-weight:600">
+      ${v>0?'+':''}${v.toLocaleString()}</span>`;
+  }
+
+  // 歷史明細表（近10日）
+  const histRows=history.slice(0,10).map(r=>`<tr>
+    <td style="font-family:var(--mono);font-size:10px;color:var(--text3);padding:4px 8px">${r.date.slice(5)}</td>
+    <td class="${drc(r.foreign)}" style="font-family:var(--mono);font-size:10px;padding:4px 8px;text-align:right">
+      ${r.foreign>0?'+':''}${r.foreign.toLocaleString()}</td>
+    <td class="${drc(r.trust)}" style="font-family:var(--mono);font-size:10px;padding:4px 8px;text-align:right">
+      ${r.trust>0?'+':''}${r.trust.toLocaleString()}</td>
+    <td class="${drc(r.dealer)}" style="font-family:var(--mono);font-size:10px;padding:4px 8px;text-align:right">
+      ${r.dealer>0?'+':''}${r.dealer.toLocaleString()}</td>
+    <td class="${drc(r.total)}" style="font-family:var(--mono);font-size:10px;font-weight:600;padding:4px 8px;text-align:right">
+      ${r.total>0?'+':''}${r.total.toLocaleString()}</td>
+  </tr>`).join('');
+
+  // 近20日法人買賣超趨勢圖
+  const histChartId='chip-hist-chart';
+  const histLabels=history.slice(0,20).reverse().map(r=>r.date.slice(5));
+  const histForeign=history.slice(0,20).reverse().map(r=>r.foreign);
+  const histTrust  =history.slice(0,20).reverse().map(r=>r.trust);
+  const histTotal  =history.slice(0,20).reverse().map(r=>r.total);
+
+  contEl.innerHTML=`
+    <style>
+      .chip-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px;margin-bottom:10px;}
+      .chip-card{background:var(--bg3);border-radius:5px;padding:8px 10px;border:1px solid var(--border);}
+      .cc-label{font-size:9px;color:var(--text3);font-family:var(--mono);margin-bottom:3px;}
+      .cc-val{font-size:12px;font-weight:600;}
+    </style>
+
+    <!-- 連續買賣天數 -->
+    <div class="chip-cards">
+      <div class="chip-card">
+        <div class="cc-label">外資動向</div>
+        <div class="cc-val">${consecHTML(fConsec,'外資')}</div>
+        <div style="font-family:var(--mono);font-size:10px;color:var(--text3);margin-top:3px;">
+          近20日 ${netHTML(sum20.foreign)}張</div>
+      </div>
+      <div class="chip-card">
+        <div class="cc-label">投信動向</div>
+        <div class="cc-val">${consecHTML(tConsec,'投信')}</div>
+        <div style="font-family:var(--mono);font-size:10px;color:var(--text3);margin-top:3px;">
+          近20日 ${netHTML(sum20.trust)}張</div>
+      </div>
+      <div class="chip-card">
+        <div class="cc-label">自營商動向</div>
+        <div class="cc-val">${consecHTML(dConsec,'自營')}</div>
+        <div style="font-family:var(--mono);font-size:10px;color:var(--text3);margin-top:3px;">
+          近20日 ${netHTML(sum20.dealer)}張</div>
+      </div>
+      <div class="chip-card">
+        <div class="cc-label">三大法人合計</div>
+        <div class="cc-val">${consecHTML(ttConsec,'合計')}</div>
+        <div style="font-family:var(--mono);font-size:10px;color:var(--text3);margin-top:3px;">
+          近20日 ${netHTML(sum20.total)}張</div>
+      </div>
+    </div>
+
+    <!-- 近20日趨勢圖 -->
+    <div style="background:var(--bg3);border-radius:6px;padding:10px;margin-bottom:10px;position:relative;height:160px;">
+      <canvas id="${histChartId}"></canvas>
+    </div>
+
+    <!-- 近10日明細表 -->
+    <div style="overflow-x:auto;border-radius:5px;border:1px solid var(--border);">
+      <table style="width:100%;border-collapse:collapse;font-size:11px;">
+        <thead><tr style="background:var(--bg3)">
+          <th style="padding:5px 8px;font-family:var(--mono);font-size:9px;color:var(--text3);border-bottom:1px solid var(--border)">日期</th>
+          <th style="padding:5px 8px;font-family:var(--mono);font-size:9px;color:var(--text3);border-bottom:1px solid var(--border);text-align:right">外資</th>
+          <th style="padding:5px 8px;font-family:var(--mono);font-size:9px;color:var(--text3);border-bottom:1px solid var(--border);text-align:right">投信</th>
+          <th style="padding:5px 8px;font-family:var(--mono);font-size:9px;color:var(--text3);border-bottom:1px solid var(--border);text-align:right">自營</th>
+          <th style="padding:5px 8px;font-family:var(--mono);font-size:9px;color:var(--text3);border-bottom:1px solid var(--border);text-align:right">合計</th>
+        </tr></thead>
+        <tbody>${histRows||'<tr><td colspan="5" style="text-align:center;padding:10px;color:var(--text3)">無資料</td></tr>'}</tbody>
+      </table>
+    </div>`;
+
+  // 渲染趨勢圖
+  setTimeout(()=>{
+    const ctx=document.getElementById(histChartId);
+    if(!ctx) return;
+    const existing=Chart.getChart(ctx);
+    if(existing) existing.destroy();
+    dpCharts[histChartId]=new Chart(ctx,{
+      type:'bar',
+      data:{
+        labels:histLabels,
+        datasets:[
+          {type:'line', label:'合計', data:histTotal,
+           borderColor:'#a78bfa', backgroundColor:'transparent',
+           pointRadius:3, borderWidth:2, tension:0.3, order:1},
+          {label:'外資', data:histForeign,
+           backgroundColor:histForeign.map(v=>v>=0?'rgba(96,165,250,.6)':'rgba(239,68,68,.4)'),
+           borderWidth:0, barPercentage:0.6, order:2},
+          {label:'投信', data:histTrust,
+           backgroundColor:histTrust.map(v=>v>=0?'rgba(34,197,94,.6)':'rgba(239,68,68,.4)'),
+           borderWidth:0, barPercentage:0.6, order:2},
+        ]
+      },
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        interaction:{mode:'index',intersect:false},
+        plugins:{
+          legend:{labels:{color:'#8b92a8',font:{size:10}}},
+          tooltip:{callbacks:{label:c=>
+            `${c.dataset.label}: ${c.parsed.y>0?'+':''}${c.parsed.y.toLocaleString()}張`
+          }}
+        },
+        scales:{
+          x:{ticks:{color:'#555e72',font:{size:9},maxRotation:0,autoSkip:true,maxTicksLimit:10},grid:{color:'#252a35'}},
+          y:{ticks:{color:'#555e72',font:{size:9}},grid:{color:'#252a35'}},
+        }
+      }
+    });
+  },60);
+}
+</script>

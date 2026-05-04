@@ -3176,3 +3176,562 @@ function renderChipContent(code, todayInst, history){
   },60);
 }
 </script>
+
+<script>
+// ══════════════════════════════════════════════
+// Step D：AI 操作建議
+// 整合 K線技術面 + 籌碼面 → Gemini 生成分析
+// ══════════════════════════════════════════════
+
+// ── 在 K線頁底部加入 AI 分析按鈕 ────────────
+const _renderTechScoreOrig = renderTechScore;
+
+function renderTechScore(data, closes, K, D, DIF, SIG, macdHist, vols){
+  // 先執行原本的評分
+  _renderTechScoreOrig(data, closes, K, D, DIF, SIG, macdHist, vols);
+
+  // 快取技術資料供 AI 使用
+  const n    = data.length;
+  const last = data[n-1];
+  const ma5  = calcMA(closes, 5);
+  const ma20 = calcMA(closes, 20);
+  const ma60 = calcMA(closes, 60);
+  const volMA5 = calcMA(vols, 5);
+
+  window._techContext = {
+    code:   window._klineCode || '',
+    name:   window._klineName || '',
+    date:   last?.date || '',
+    close:  last?.close,
+    open:   last?.open,
+    high:   last?.high,
+    low:    last?.low,
+    vol:    last?.vol,
+    volMA5: volMA5[n-1],
+    ma5:    ma5[n-1],
+    ma20:   ma20[n-1],
+    ma60:   ma60[n-1],
+    k:      K[n-1],
+    d:      D[n-1],
+    dif:    DIF[n-1],
+    sig:    SIG[n-1],
+    hist:   macdHist[n-1],
+    histPrev: macdHist[n-2],
+    // 近5日OHLC摘要
+    recent5: data.slice(-5).map(d=>({
+      date:d.date.slice(5), o:d.open, h:d.high, l:d.low, c:d.close, v:d.vol
+    })),
+    params: {...PARAMS},
+  };
+
+  // 加入 AI 按鈕到評分卡下方
+  const scoreBox = document.getElementById('kl-score-box');
+  if(!scoreBox) return;
+
+  const aiDiv = document.createElement('div');
+  aiDiv.id = 'kl-ai-box';
+  aiDiv.style.marginTop = '10px';
+  aiDiv.innerHTML = `
+    <style>
+      .kl-ai-panel{background:var(--bg2);border:1px solid var(--border2);
+                   border-radius:8px;overflow:hidden;}
+      .kl-ai-hdr{background:var(--bg3);padding:9px 14px;
+                 display:flex;align-items:center;justify-content:space-between;
+                 border-bottom:1px solid var(--border);}
+      .kl-ai-title{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--purple);}
+      .kl-ai-actions{display:flex;gap:6px;}
+      .kl-ai-btn{background:var(--purple);color:#000;border:none;border-radius:4px;
+                 padding:4px 12px;font-family:var(--mono);font-size:11px;
+                 font-weight:600;cursor:pointer;}
+      .kl-ai-btn:hover{opacity:.85;} .kl-ai-btn:disabled{opacity:.4;cursor:default;}
+      .kl-ai-btn.outline{background:transparent;border:1px solid var(--purple);
+                         color:var(--purple);}
+      .kl-ai-body{padding:12px 14px;font-size:12px;line-height:1.9;
+                  color:var(--text2);min-height:56px;white-space:pre-wrap;}
+      .kl-ai-body.thinking{color:var(--text3);font-family:var(--mono);
+                           animation:blink 1s infinite;}
+      .kl-ai-input-row{display:flex;gap:6px;padding:8px 14px;
+                       border-top:1px solid var(--border);background:var(--bg3);}
+      .kl-ai-input{flex:1;background:var(--bg);border:1px solid var(--border2);
+                   border-radius:4px;color:var(--text);font-family:var(--sans);
+                   font-size:12px;padding:6px 10px;outline:none;}
+      .kl-ai-input:focus{border-color:var(--purple);}
+      .kl-ai-send{background:var(--bg4);border:1px solid var(--border2);
+                  color:var(--text2);border-radius:4px;padding:6px 12px;
+                  font-family:var(--mono);font-size:11px;cursor:pointer;}
+      .kl-ai-send:hover{color:var(--text);}
+      .ai-tag-row{display:flex;gap:5px;flex-wrap:wrap;padding:8px 14px;
+                  border-bottom:1px solid var(--border);background:var(--bg3);}
+      .ai-tag{background:var(--bg4);border:1px solid var(--border2);color:var(--text2);
+              font-family:var(--mono);font-size:10px;padding:3px 8px;border-radius:4px;
+              cursor:pointer;}
+      .ai-tag:hover{border-color:var(--purple);color:var(--purple);}
+    </style>
+
+    <div class="kl-ai-panel">
+      <div class="kl-ai-hdr">
+        <span class="kl-ai-title">🤖 AI 技術 + 籌碼操作建議</span>
+        <div class="kl-ai-actions">
+          <button class="kl-ai-btn outline" onclick="klAIAnalyze('short')">短線</button>
+          <button class="kl-ai-btn outline" onclick="klAIAnalyze('mid')">中線</button>
+          <button class="kl-ai-btn" id="kl-ai-btn" onclick="klAIAnalyze('full')">完整分析</button>
+        </div>
+      </div>
+      <div class="ai-tag-row">
+        <span style="font-family:var(--mono);font-size:10px;color:var(--text3);">快問：</span>
+        <span class="ai-tag" onclick="klAIAsk('目前趨勢是多頭還是空頭？')">趨勢判斷</span>
+        <span class="ai-tag" onclick="klAIAsk('現在適合買進嗎？停損和目標價在哪裡？')">買賣點</span>
+        <span class="ai-tag" onclick="klAIAsk('KD和MACD發出什麼訊號？')">指標解讀</span>
+        <span class="ai-tag" onclick="klAIAsk('法人籌碼面如何？主力動向為何？')">籌碼解讀</span>
+        <span class="ai-tag" onclick="klAIAsk('近期有什麼型態訊號？')">型態分析</span>
+      </div>
+      <div class="kl-ai-body" id="kl-ai-body">
+        點擊「完整分析」或「短線/中線」，AI 將整合技術面與籌碼面給出操作建議。
+      </div>
+      <div class="kl-ai-input-row">
+        <input class="kl-ai-input" id="kl-ai-input"
+          placeholder="自由提問（例：這支股票的支撐壓力在哪裡？）"
+          onkeydown="if(event.key==='Enter') klAISend()">
+        <button class="kl-ai-send" onclick="klAISend()">送出</button>
+      </div>
+    </div>`;
+
+  scoreBox.appendChild(aiDiv);
+  window._klAIHistory = [];
+}
+
+// ── 建立 AI 分析 Prompt ───────────────────────
+function buildKlPrompt(type){
+  const tc  = window._techContext || {};
+  const chip= window._chipContext  || {};
+  const s   = STOCKS[activeCode]  || {};
+
+  const f = v => v != null ? Number(v).toFixed(2) : '—';
+  const fi= v => v != null ? Number(v).toFixed(4) : '—';
+
+  const techPart = `
+【股票基本資訊】
+代號：${tc.code}  名稱：${tc.name}
+日期：${tc.date}
+收盤：${tc.close}  開盤：${tc.open}  最高：${tc.high}  最低：${tc.low}
+成交量：${tc.vol ? Math.round(tc.vol).toLocaleString() : '—'} 張（量MA5: ${f(tc.volMA5)} 張）
+
+【均線】
+MA${tc.params?.ma?.[0]||5}：${f(tc.ma5)}  MA${tc.params?.ma?.[1]||20}：${f(tc.ma20)}  MA${tc.params?.ma?.[2]||60}：${f(tc.ma60)}
+
+【KD（${tc.params?.kd_n||9},${tc.params?.kd_m1||3},${tc.params?.kd_m2||3}）】
+K：${f(tc.k)}  D：${f(tc.d)}
+
+【MACD（${tc.params?.macd_fast||12},${tc.params?.macd_slow||26},${tc.params?.macd_signal||9}）】
+DIF：${fi(tc.dif)}  DEA：${fi(tc.sig)}  柱：${fi(tc.hist)}（前日柱：${fi(tc.histPrev)}）
+
+【近5日K線】
+${(tc.recent5||[]).map(d=>`${d.date} 開${d.o} 高${d.h} 低${d.l} 收${d.c} 量${Math.round(d.v)}`).join('\n')}`;
+
+  // ETF 持倉摘要
+  const etfPart = s.etfs?.length ? `
+【ETF持倉狀況】
+${s.etfs.map(e=>`${e.etf} ${e.etf_name}：${e.action} ${e.rank} 權重${Number(e.weight).toFixed(2)}%${e.wchg!=null?' 變化'+(e.wchg>0?'+':'')+e.wchg+'pp':''}`).join('\n')}` : '';
+
+  const chipPart = window._chipContextText || '';
+
+  const promptMap = {
+    short: `你是台股技術分析師，請根據以下資料給出【短線（1~5日）】操作建議：\n${techPart}${etfPart}${chipPart}\n\n請用繁體中文，條列回答：\n1.短線趨勢判斷\n2.進場時機與條件\n3.建議買點區間\n4.停損價位\n5.短線目標價`,
+    mid:   `你是台股技術分析師，請根據以下資料給出【中線（1~3個月）】操作建議：\n${techPart}${etfPart}${chipPart}\n\n請用繁體中文，條列回答：\n1.中線趨勢研判\n2.關鍵支撐與壓力\n3.中線布局策略\n4.停損建議\n5.中線目標區間`,
+    full:  `你是台股專業分析師，請根據以下技術面與籌碼面資料，給出完整操作建議：\n${techPart}${etfPart}${chipPart}\n\n請用繁體中文，依序分析：\n1.【趨勢判斷】多空方向與強弱\n2.【技術指標】KD、MACD、均線綜合解讀\n3.【籌碼解讀】法人動向與主力意圖\n4.【ETF加持】主動ETF的佈局意涵\n5.【操作建議】進出場條件、買點、停損、目標價\n6.【風險提示】需注意的關鍵風險`,
+  };
+  return promptMap[type] || promptMap.full;
+}
+
+// ── 主分析入口 ────────────────────────────────
+async function klAIAnalyze(type){
+  const body = document.getElementById('kl-ai-body');
+  const btn  = document.getElementById('kl-ai-btn');
+  if(!body) return;
+  body.className='kl-ai-body thinking';
+  body.textContent='▶ AI 分析中，請稍候...';
+  if(btn) btn.disabled=true;
+
+  const prompt = buildKlPrompt(type);
+  window._klAIHistory = [{role:'user', content:prompt}];
+  await callKlClaude(body, btn);
+}
+
+async function klAIAsk(question){
+  const body = document.getElementById('kl-ai-body');
+  const btn  = document.getElementById('kl-ai-btn');
+  if(!body) return;
+
+  // 如果還沒分析過，先建立基礎 context
+  if(!window._klAIHistory?.length){
+    window._klAIHistory = [{
+      role:'user',
+      content: buildKlPrompt('full') + '\n\n請先做完整分析，再回答：' + question
+    }];
+  } else {
+    window._klAIHistory.push({role:'user', content:question});
+  }
+
+  body.className='kl-ai-body thinking';
+  body.textContent='▶ 思考中...';
+  if(btn) btn.disabled=true;
+  await callKlClaude(body, btn);
+}
+
+async function klAISend(){
+  const input = document.getElementById('kl-ai-input');
+  const msg   = input?.value?.trim();
+  if(!msg) return;
+  input.value='';
+  await klAIAsk(msg);
+}
+
+// ── 呼叫 Gemini ───────────────────────────────
+async function callKlClaude(body, btn){
+  if(!GEMINI_KEY){
+    body.className='kl-ai-body';
+    body.innerHTML=`<div class="notice">
+      ⚠ 尚未設定 Gemini API Key。<br>
+      請在 index.html 頂端填入 <code>GEMINI_KEY</code>。<br>
+      免費申請：<a href="https://aistudio.google.com/apikey"
+      target="_blank" style="color:var(--purple)">aistudio.google.com/apikey</a>
+    </div>
+    <pre style="font-size:10px;color:var(--text2);white-space:pre-wrap;
+                background:var(--bg3);padding:10px;border-radius:5px;
+                overflow-x:auto;max-height:200px;">${buildKlPrompt('full').slice(0,600)}...</pre>`;
+    if(btn) btn.disabled=false;
+    return;
+  }
+  try{
+    const contents = (window._klAIHistory||[]).map(m=>({
+      role: m.role==='assistant'?'model':'user',
+      parts:[{text:m.content}]
+    }));
+    const url=`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_KEY}`;
+    const r=await fetch(url,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        contents,
+        generationConfig:{maxOutputTokens:1500, temperature:0.7}
+      })
+    });
+    if(!r.ok){
+      const err=await r.json().catch(()=>({}));
+      throw new Error(err?.error?.message||`HTTP ${r.status}`);
+    }
+    const data  = await r.json();
+    const reply = data.candidates?.[0]?.content?.parts?.[0]?.text||'（無回應）';
+    window._klAIHistory.push({role:'assistant',content:reply});
+    body.className='kl-ai-body';
+    body.innerHTML=reply
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      .replace(/\n/g,'<br>');
+  }catch(e){
+    body.className='kl-ai-body';
+    body.innerHTML=`<div class="notice">Gemini 呼叫失敗：${e.message}</div>`;
+  }finally{
+    if(btn) btn.disabled=false;
+  }
+}
+
+// ── 從籌碼頁快取文字供 AI 使用 ───────────────
+function cacheChipContext(code, history){
+  if(!history?.length){ window._chipContextText=''; return; }
+  const sum20={foreign:0,trust:0,dealer:0,total:0};
+  history.forEach(r=>{
+    sum20.foreign+=r.foreign; sum20.trust+=r.trust;
+    sum20.dealer+=r.dealer;   sum20.total+=r.total;
+  });
+  const last=history[0];
+  window._chipContextText=`
+【三大法人籌碼（近20日）】
+外資近20日累積：${sum20.foreign>0?'+':''}${sum20.foreign.toLocaleString()} 張
+投信近20日累積：${sum20.trust>0?'+':''}${sum20.trust.toLocaleString()} 張
+自營近20日累積：${sum20.dealer>0?'+':''}${sum20.dealer.toLocaleString()} 張
+三大合計累積：${sum20.total>0?'+':''}${sum20.total.toLocaleString()} 張
+最新一日（${last.date}）：外資${last.foreign>0?'+':''}${last.foreign} 投信${last.trust>0?'+':''}${last.trust} 合計${last.total>0?'+':''}${last.total}`;
+}
+
+// 掛鉤到 renderChipContent
+const _renderChipContentOrig = renderChipContent;
+function renderChipContent(code, todayInst, history){
+  _renderChipContentOrig(code, todayInst, history);
+  cacheChipContext(code, history);
+}
+</script>
+
+<script>
+// ══════════════════════════════════════════════
+// Step D：AI操作建議
+// 整合K線+技術評分+籌碼 → Gemini分析
+// ══════════════════════════════════════════════
+
+// ── 在技術評分下方加入 AI 建議按鈕 ──────────
+const _renderTechScoreOrig = renderTechScore;
+
+function renderTechScore(data, closes, K, D, DIF, SIG, macdHist, vols){
+  // 先執行原本的評分渲染
+  _renderTechScoreOrig(data, closes, K, D, DIF, SIG, macdHist, vols);
+
+  // 儲存技術資料供 AI 使用
+  window._techData = { data, closes, K, D, DIF, SIG, macdHist, vols };
+
+  // 在評分下方加入 AI 建議區塊
+  const scoreBox = document.getElementById('kl-score-box');
+  if(!scoreBox) return;
+
+  const aiDiv = document.createElement('div');
+  aiDiv.id = 'stock-ai-box';
+  aiDiv.style.marginTop = '10px';
+  aiDiv.innerHTML = buildStockAIBox();
+  scoreBox.appendChild(aiDiv);
+}
+
+function buildStockAIBox(){
+  return `
+  <style>
+    .sai-box{background:var(--bg2);border:1px solid var(--border2);border-radius:8px;overflow:hidden;}
+    .sai-hdr{background:var(--bg3);padding:10px 14px;display:flex;align-items:center;
+             justify-content:space-between;border-bottom:1px solid var(--border);flex-wrap:wrap;gap:8px;}
+    .sai-title{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--purple);}
+    .sai-btns{display:flex;gap:6px;flex-wrap:wrap;}
+    .sai-btn{border:none;border-radius:4px;padding:5px 12px;font-family:var(--mono);
+             font-size:11px;font-weight:600;cursor:pointer;transition:.15s;}
+    .sai-btn.primary{background:var(--purple);color:#000;}
+    .sai-btn.primary:hover{opacity:.85;}
+    .sai-btn.secondary{background:var(--bg4);border:1px solid var(--border2);color:var(--text2);}
+    .sai-btn.secondary:hover{color:var(--text);}
+    .sai-btn:disabled{opacity:.4;cursor:default;}
+    .sai-body{padding:12px 14px;font-size:12px;line-height:1.9;color:var(--text2);
+              min-height:60px;white-space:pre-wrap;}
+    .sai-body.thinking{color:var(--text3);font-family:var(--mono);animation:blink 1s infinite;}
+    .sai-input-row{display:flex;gap:6px;padding:8px 14px;
+                   border-top:1px solid var(--border);background:var(--bg3);}
+    .sai-input{flex:1;background:var(--bg);border:1px solid var(--border2);border-radius:4px;
+               color:var(--text);font-family:var(--sans);font-size:12px;padding:6px 10px;outline:none;}
+    .sai-input:focus{border-color:var(--purple);}
+    .sai-send{background:var(--bg4);border:1px solid var(--border2);color:var(--text2);
+              border-radius:4px;padding:6px 12px;font-family:var(--mono);font-size:11px;cursor:pointer;}
+    .sai-send:hover{color:var(--text);}
+    .ai-result-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));
+                    gap:8px;margin-bottom:12px;}
+    .ai-result-card{background:var(--bg3);border-radius:5px;padding:8px 10px;border:1px solid var(--border);}
+    .arc-label{font-size:9px;color:var(--text3);font-family:var(--mono);margin-bottom:3px;}
+    .arc-val{font-size:13px;font-weight:600;font-family:var(--mono);}
+  </style>
+  <div class="sai-box">
+    <div class="sai-hdr">
+      <span class="sai-title">🤖 AI操作建議（Gemini）</span>
+      <div class="sai-btns">
+        <button class="sai-btn secondary" onclick="runStockAI('quick')">快速分析</button>
+        <button class="sai-btn primary"   onclick="runStockAI('full')">完整分析</button>
+      </div>
+    </div>
+    <div class="sai-body" id="sai-body">
+      點擊「快速分析」取得簡短操作建議，或「完整分析」取得詳細報告。
+    </div>
+    <div class="sai-input-row">
+      <input class="sai-input" id="sai-input"
+        placeholder="追問（例：支撐在哪？突破後目標價？）"
+        onkeydown="if(event.key==='Enter') sendStockAI()">
+      <button class="sai-send" onclick="sendStockAI()">送出</button>
+    </div>
+  </div>`;
+}
+
+// ── 組裝送給 AI 的技術資料摘要 ──────────────
+function buildStockPrompt(code, name, mode){
+  const td  = window._techData;
+  const cd  = window._chipData || {};
+  if(!td) return '';
+
+  const data   = td.data;
+  const closes = td.closes;
+  const K      = td.K;
+  const D      = td.D;
+  const DIF    = td.DIF;
+  const SIG    = td.SIG;
+  const macdH  = td.macdHist;
+  const vols   = td.vols;
+  const n      = data.length;
+  const last   = data[n-1];
+
+  // MA 值
+  const ma5  = calcMA(closes,5)[n-1];
+  const ma20 = calcMA(closes,20)[n-1];
+  const ma60 = calcMA(closes,60)[n-1];
+
+  // 近5日漲跌
+  const chg5 = closes[n-1] && closes[n-6]
+    ? ((closes[n-1]-closes[n-6])/closes[n-6]*100).toFixed(2)
+    : '—';
+
+  // 量比
+  const volMA5   = calcMA(vols,5)[n-1];
+  const volRatio = volMA5 ? (vols[n-1]/volMA5).toFixed(2) : '—';
+
+  const kLine = `
+股票代號：${code}  名稱：${name}
+最新交易日：${last?.date}
+開盤：${last?.open}  最高：${last?.high}  最低：${last?.low}  收盤：${last?.close}
+近5日漲跌：${chg5}%  今日量比：${volRatio}倍
+MA5：${ma5?.toFixed(2)||'—'}  MA20：${ma20?.toFixed(2)||'—'}  MA60：${ma60?.toFixed(2)||'—'}
+K值：${K[n-1]?.toFixed(2)||'—'}  D值：${D[n-1]?.toFixed(2)||'—'}
+DIF：${DIF[n-1]?.toFixed(4)||'—'}  DEA：${SIG[n-1]?.toFixed(4)||'—'}  MACD柱：${macdH[n-1]?.toFixed(4)||'—'}`;
+
+  // 近5日K線
+  const recentK = data.slice(-5).map(d=>
+    `  ${d.date.slice(5)} 開${d.open} 高${d.high} 低${d.low} 收${d.close}`
+  ).join('\n');
+
+  // 籌碼資料
+  const chip = cd.consecutive ? `
+外資：${cd.consecutive.foreign}  投信：${cd.consecutive.trust}  自營：${cd.consecutive.dealer}
+近20日合計買賣超：${cd.sum20?.total?.toLocaleString()||'—'}張` : '（籌碼資料載入中）';
+
+  if(mode==='quick'){
+    return `你是台股技術分析師，請根據以下資料給出簡短操作建議（100字內）：
+${kLine}
+請直接給出：趨勢判斷、建議操作方向、注意事項。不要廢話。`;
+  }
+
+  return `你是資深台股技術分析師，請根據以下完整資料給出詳細操作報告：
+
+【技術面】
+${kLine}
+
+【近5日K線】
+${recentK}
+
+【籌碼面（三大法人連續買賣）】
+${chip}
+
+【ETF持倉】
+${code} 被以下主動ETF持有：${(STOCKS[code]?.etfs||[]).map(e=>e.etf+'('+e.weight?.toFixed(2)+'%)').join('、')||'無'}
+
+請回答：
+1.【趨勢判斷】多頭/空頭/盤整，理由
+2.【關鍵支撐/壓力】列出具體價位
+3.【操作建議】短線/中線操作方向
+4.【目標價位】樂觀/保守目標
+5.【停損設定】建議停損價位
+6.【風險提示】需注意的風險
+請用繁體中文，條列式，精準簡短。`;
+}
+
+// ── 執行 AI 分析 ─────────────────────────────
+let stockAiHistory = [];
+
+async function runStockAI(mode){
+  const body = document.getElementById('sai-body');
+  const btns = document.querySelectorAll('.sai-btn');
+  if(!body) return;
+
+  btns.forEach(b=>b.disabled=true);
+  body.className = 'sai-body thinking';
+  body.textContent = '▶ AI分析中，請稍候...';
+
+  const s    = STOCKS[activeCode] || {};
+  const code = activeCode || '';
+  const name = s.name || code;
+  const prompt = buildStockPrompt(code, name, mode);
+
+  if(!prompt){
+    body.className='sai-body';
+    body.innerHTML='<div class="notice">請先點選個股並等待K線資料載入後再分析。</div>';
+    btns.forEach(b=>b.disabled=false);
+    return;
+  }
+
+  stockAiHistory = [{role:'user', content:prompt}];
+  await callStockGemini(body, btns);
+}
+
+async function sendStockAI(){
+  const input = document.getElementById('sai-input');
+  const body  = document.getElementById('sai-body');
+  const btns  = document.querySelectorAll('.sai-btn');
+  const msg   = input?.value?.trim();
+  if(!msg) return;
+  if(!stockAiHistory.length){
+    body.innerHTML='<div class="notice">請先點擊「快速分析」或「完整分析」後再追問。</div>';
+    return;
+  }
+  input.value='';
+  stockAiHistory.push({role:'user', content:msg});
+  btns.forEach(b=>b.disabled=true);
+  body.className='sai-body thinking';
+  body.textContent='▶ 思考中...';
+  await callStockGemini(body, btns);
+}
+
+async function callStockGemini(body, btns){
+  if(!GEMINI_KEY){
+    body.className='sai-body';
+    body.innerHTML=`<div class="notice">⚠ 尚未設定 Gemini API Key。<br>
+      請編輯 index.html 頂端的 <code>GEMINI_KEY</code> 填入你的 Key。<br>
+      免費申請：<a href="https://aistudio.google.com/apikey"
+      target="_blank" style="color:var(--purple)">aistudio.google.com/apikey</a></div>`;
+    btns.forEach(b=>b.disabled=false);
+    return;
+  }
+  try{
+    const geminiContents = stockAiHistory.map(m=>({
+      role: m.role==='assistant'?'model':'user',
+      parts:[{text:m.content}]
+    }));
+    const url=`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_KEY}`;
+    const r=await fetch(url,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        contents:geminiContents,
+        generationConfig:{maxOutputTokens:1200, temperature:0.6}
+      })
+    });
+    if(!r.ok){
+      const err=await r.json().catch(()=>({}));
+      throw new Error(err?.error?.message||`HTTP ${r.status}`);
+    }
+    const data  = await r.json();
+    const reply = data.candidates?.[0]?.content?.parts?.[0]?.text||'（無回應）';
+    stockAiHistory.push({role:'assistant',content:reply});
+    body.className='sai-body';
+    body.innerHTML=reply
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      .replace(/\n/g,'<br>');
+  }catch(e){
+    body.className='sai-body';
+    body.innerHTML=`<div class="notice">Gemini 呼叫失敗：${e.message}</div>`;
+  }finally{
+    btns.forEach(b=>b.disabled=false);
+  }
+}
+
+// ── 籌碼資料快取（供 AI 使用）───────────────
+const _renderChipContentOrig = renderChipContent;
+function renderChipContent(code, todayInst, history){
+  // 快取籌碼資料
+  if(history && history.length){
+    function calcC(arr,key){
+      let buy=0,sell=0;
+      const last=arr[0]?.[key]||0;
+      if(last>0){ for(const r of arr){ if(r[key]>0)buy++; else break; } }
+      else if(last<0){ for(const r of arr){ if(r[key]<0)sell++; else break; } }
+      return {buy,sell,label:buy>0?`連買${buy}天`:sell>0?`連賣${sell}天`:'持平'};
+    }
+    const sum20={foreign:0,trust:0,dealer:0,total:0};
+    history.forEach(r=>{sum20.foreign+=r.foreign;sum20.trust+=r.trust;sum20.dealer+=r.dealer;sum20.total+=r.total;});
+    window._chipData={
+      consecutive:{
+        foreign: calcC(history,'foreign').label,
+        trust:   calcC(history,'trust').label,
+        dealer:  calcC(history,'dealer').label,
+      },
+      sum20,
+    };
+  }
+  _renderChipContentOrig(code, todayInst, history);
+}
+</script>
